@@ -1,0 +1,28 @@
+{
+    "hosting": {
+        "public": "build/web",
+        "ignore": [
+            "firebase.json",
+            "**/.*",
+            "**/node_modules/**"
+        ],
+        "rewrites": [
+            {
+                "source": "**",
+                "destination": "/index.html"
+            }
+        ]
+    },
+    "flutter": {
+        "platforms": {
+            "dart": {
+                "lib/firebase_options.dart": {
+                    "projectId": "hrtimeplace",
+                    "configurations": {
+                        "web": "1:466805262752:web:0f7cca4c3acd12f87cbcc5"
+                    }
+                }
+            }
+        }
+    }
+}

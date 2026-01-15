@@ -1,0 +1,54 @@
+openapi: 3.0.0
+info:
+  title: HR2O Scheduler Import API
+  description: Secure API for importing company and employee data.
+  version: 1.0.0
+servers:
+  - url: https://timeplanner-466805262752.europe-west3.run.app
+    description: Python AI Engine (Cloud Run)
+paths:
+  /schedule/generate:
+    post:
+      summary: Generate Optimized Schedule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                start_date: { type: string }
+                end_date: { type: string }
+                employees: { type: array, items: { type: object } }
+      responses:
+        '200':
+          description: OK
+  /training/log-feedback:
+    post:
+      summary: Log User Feedback (Self-Learning)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                action: { type: string }
+                selected_id: { type: string }
+                rejected_id: { type: string }
+      responses:
+        '200':
+          description: OK
+  /training/retrain:
+    post:
+      summary: Trigger AI Retraining
+      responses:
+        '200':
+          description: OK
+  /api/v1/import-data:
+    post:
+      summary: Import Employees (Legacy/Ingestion)
+      security:
+        - hmacAuth: []
+# ... rest of file (omitted for brevity)
+
