@@ -3,10 +3,10 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../utils/security_utils.dart';
 import '../models/agent_models.dart';
+import '../models/company_model.dart';
 
 class ScheduleRepository {
   final FirebaseFirestore _firestore;
-  final String companyId;
   
   // USE THIS FOR LOCAL DEV:
   //static const String _baseUrl = "http://127.0.0.1:8000";
@@ -15,8 +15,12 @@ class ScheduleRepository {
   static const String _baseUrl = "https://timeplanner-466805262752.europe-west3.run.app";
 
   ScheduleRepository({FirebaseFirestore? firestore, String? companyId})
-      : _firestore = firestore ?? FirebaseFirestore.instance,
-        companyId = companyId ?? SecurityUtils.activeEnvironment;
+      : _firestore = firestore ?? FirebaseFirestore.instance;
+
+  String get _currentEnv => SecurityUtils.activeEnvironment;
+  
+  /// Sanitizes company ID for use in Firestore paths (removes slashes)
+  String get _sanitizedEnv => SecurityUtils.activeEnvironment.replaceAll('/', '_');
 
   Future<List<Activity>> getActivities() async {
     final url = Uri.parse("$_baseUrl/agent/activities");
@@ -40,10 +44,21 @@ class ScheduleRepository {
     throw Exception("Failed to load employment: ${response.body}");
   }
 
+  Future<List<Company>> getCompanies() async {
+    final url = Uri.parse("$_baseUrl/agent/companies");
+    final response = await http.get(url, headers: SecurityUtils.getHeaders(""));
+    
+    if (response.statusCode == 200) {
+      final List data = jsonDecode(response.body);
+      return data.map((item) => Company.fromJson(item)).toList();
+    }
+    throw Exception("Failed to load companies: ${response.body}");
+  }
+
   Stream<List<Map<String, dynamic>>> getSchedules() {
     return _firestore
         .collection('companies')
-        .doc(companyId)
+        .doc(_sanitizedEnv)
         .collection('schedules')
         .snapshots()
         .map((snapshot) {
@@ -55,6 +70,7 @@ class ScheduleRepository {
     required DateTime startDate, 
     required DateTime endDate,
     required List<Employment> employees,
+    required List<Activity> activities,
     List<Map<String, dynamic>> unavailabilities = const [],
   }) async {
     final payload = {
@@ -62,6 +78,7 @@ class ScheduleRepository {
       "end_date": endDate.toIso8601String().split('T')[0],
       "employees": employees.map((e) => e.toJson()).toList(),
       "unavailabilities": unavailabilities,
+      "activities": activities.map((a) => a.toJson()).toList(),
       "constraints": {"min_rest_hours": 11}
     };
 
@@ -86,48 +103,10 @@ class ScheduleRepository {
     }
   }
 
-  Future<void> logFeedback({
-    required String shiftId,
-    required String droppedEmployeeId,
-    String? replacedEmployeeId,
-    required DateTime shiftStart,
-    required String role,
-  }) async {
-    final url = Uri.parse("$_baseUrl/training/log-feedback");
-    
-    final payload = {
-      "action": "manual_override",
-      "selected_id": droppedEmployeeId,
-      "rejected_id": replacedEmployeeId,
-      "shift_data": {
-        "shift_id": shiftId,
-        "start": shiftStart.toIso8601String(),
-        "role": role
-      }
-    };
 
-    final payloadStr = jsonEncode(payload);
-
-    try {
-      final response = await http.post(
-        url,
-        headers: SecurityUtils.getHeaders(payloadStr),
-        body: payloadStr,
-      );
-
-      if (response.statusCode == 200) {
-        print("Feedback logged successfully via API for Shift ID: $shiftId");
-      } else {
-        print("Failed to log feedback: ${response.body}");
-      }
-    } catch (e) {
-      print("Error logging feedback: $e");
-    }
-  }
-
-  Future<Map<String, dynamic>> triggerRetraining() async {
+  Future<Map<String, dynamic>> retrain() async {
     final url = Uri.parse("$_baseUrl/training/retrain");
-    final payloadStr = jsonEncode({"company_id": companyId});
+    final payloadStr = jsonEncode({"company_id": _currentEnv});
     
     try {
       final response = await http.post(
@@ -144,6 +123,62 @@ class ScheduleRepository {
     } catch (e) {
       print("Error calling Retrain API: $e");
       rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> getDiagnostics() async {
+    final url = Uri.parse("$_baseUrl/agent/diagnostics");
+    try {
+      final response = await http.get(url, headers: SecurityUtils.getHeaders(""));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return {};
+    } catch (e) {
+      print("Error getting diagnostics: $e");
+      return {};
+    }
+  }
+
+  Future<Map<String, List<String>>> getSchema() async {
+    final response = await http.get(
+      Uri.parse('$_baseUrl/agent/schema'),
+      headers: SecurityUtils.getHeaders(""),
+    );
+    if (response.statusCode != 200) return {};
+    final data = json.decode(response.body) as Map<String, dynamic>;
+    return data.map((key, value) => MapEntry(key, List<String>.from(value)));
+  }
+
+  Future<List<Map<String, dynamic>>> getFeatures() async {
+    final response = await http.get(
+      Uri.parse('$_baseUrl/agent/features'),
+      headers: SecurityUtils.getHeaders(""),
+    );
+    if (response.statusCode != 200) return [];
+    final List<dynamic> data = json.decode(response.body);
+    return data.map((e) => e as Map<String, dynamic>).toList();
+  }
+
+  Future<Map<String, List<String>>> getMappings() async {
+    final response = await http.get(
+      Uri.parse('$_baseUrl/agent/mappings'),
+      headers: SecurityUtils.getHeaders(""),
+    );
+    if (response.statusCode != 200) return {};
+    final data = json.decode(response.body) as Map<String, dynamic>;
+    return data.map((key, value) => MapEntry(key, List<String>.from(value)));
+  }
+
+  Future<void> saveMappings(Map<String, List<String>> mappings) async {
+    final payloadStr = jsonEncode(mappings);
+    final response = await http.post(
+      Uri.parse('$_baseUrl/agent/mappings'),
+      headers: SecurityUtils.getHeaders(payloadStr),
+      body: payloadStr,
+    );
+    if (response.statusCode != 200) {
+      throw Exception("Failed to save mappings: ${response.body}");
     }
   }
 
@@ -169,21 +204,17 @@ class ScheduleRepository {
     }
   }
 
-  Future<DemandConfig> learnDemand() async {
-    // Ensure _baseUrl is accessible. It is likely an instance variable defined at top of class.
+  Future<Map<String, dynamic>> learnDemand() async {
     final url = Uri.parse("$_baseUrl/learning/demand");
     try {
       final response = await http.get(url, headers: SecurityUtils.getHeaders(""));
-      
       if (response.statusCode == 200) {
-        return DemandConfig.fromJson(jsonDecode(response.body));
-      } else {
-        throw Exception("Failed to learn demand: ${response.body}");
+        return jsonDecode(response.body);
       }
+      return {};
     } catch (e) {
       print("Error learning demand: $e");
-      // Fallback to default if offline or error
-      return const DemandConfig();
+      return {};
     }
   }
 
@@ -202,13 +233,17 @@ class ScheduleRepository {
     }
   }
 
-  Future<List<String>> getEnvironments() async {
+  Future<List<Map<String, String>>> getEnvironments() async {
     final url = Uri.parse("$_baseUrl/training/environments");
     try {
       final response = await http.get(url, headers: SecurityUtils.getHeaders(""));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        return List<String>.from(data['environments'] ?? []);
+        final List envs = data['environments'] ?? [];
+        return envs.map((e) => {
+          "id": e['id'].toString(),
+          "name": e['name'].toString(),
+        }).toList();
       }
       return [];
     } catch (e) {
@@ -228,6 +263,111 @@ class ScheduleRepository {
     } catch (e) {
       print("Error fetching model stats: $e");
       rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> getAlgorithmConfig() async {
+    final url = Uri.parse("$_baseUrl/training/config");
+    try {
+      final response = await http.get(url, headers: SecurityUtils.getHeaders(""));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      throw Exception("Failed to load config");
+    } catch (e) {
+      print("Error fetching algorithm config: $e");
+      rethrow;
+    }
+  }
+
+  Future<void> saveAlgorithmConfig(Map<String, dynamic> config) async {
+    final url = Uri.parse("$_baseUrl/training/config");
+    final payloadStr = jsonEncode(config);
+    try {
+      final response = await http.post(
+        url,
+        headers: SecurityUtils.getHeaders(payloadStr),
+        body: payloadStr,
+      );
+      if (response.statusCode != 200) {
+        throw Exception("Failed to save config: ${response.body}");
+      }
+    } catch (e) {
+      print("Error saving algorithm config: $e");
+      rethrow;
+    }
+  }
+
+  Future<void> logFeedback({
+    required String action,
+    required String selectedId,
+    String? rejectedId,
+    Map<String, dynamic> shiftData = const {},
+  }) async {
+    final url = Uri.parse("$_baseUrl/training/log-feedback");
+    final payload = {
+      "action": action,
+      "selected_id": selectedId,
+      "rejected_id": rejectedId,
+      "shift_data": shiftData,
+    };
+    final payloadStr = jsonEncode(payload);
+
+    try {
+      await http.post(
+        url,
+        headers: SecurityUtils.getHeaders(payloadStr),
+        body: payloadStr,
+      );
+    } catch (e) {
+      print("Error logging feedback: $e");
+    }
+  }
+
+  Future<List<dynamic>> getHistoricalSchedule(DateTime start, DateTime end) async {
+    final startStr = start.toIso8601String().split('T')[0];
+    final endStr = end.toIso8601String().split('T')[0];
+    final url = Uri.parse("$_baseUrl/schedule/historical?start_date=$startStr&end_date=$endStr");
+    
+    try {
+      final response = await http.get(url, headers: SecurityUtils.getHeaders(""));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return [];
+    } catch (e) {
+      print("Error fetching historical schedule: $e");
+      return [];
+    }
+  }
+
+  Future<void> saveScheduleToFirestore(Map<String, dynamic> scheduleData) async {
+    try {
+      final docRef = _firestore
+          .collection('companies')
+          .doc(_sanitizedEnv)
+          .collection('schedules')
+          .doc('current');
+      
+      await docRef.set({
+        ...scheduleData,
+        'timestamp': FieldValue.serverTimestamp(),
+        'environment': _currentEnv,
+      });
+      
+      print("Schedule saved to Firestore for $_currentEnv (sanitized: $_sanitizedEnv)");
+    } catch (e) {
+      print("Error saving schedule to Firestore: $e");
+    }
+  }
+
+  Future<void> resetStatus() async {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/agent/reset_status'),
+      headers: SecurityUtils.getHeaders(""),
+    );
+    if (response.statusCode != 200) {
+      throw Exception("Failed to reset status: ${response.body}");
     }
   }
 }

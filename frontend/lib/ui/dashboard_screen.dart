@@ -9,6 +9,10 @@ import 'theme/app_theme.dart';
 import '../utils/security_utils.dart';
 
 import 'settings/developer_hub_screen.dart';
+import 'settings/ai_engine_monitor_screen.dart';
+import 'jobs_management_screen.dart';
+import 'company_selection_screen.dart';
+import 'schedule_comparison_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -18,23 +22,11 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  List<String> _environments = [];
-  bool _loadingEnvs = true;
-
   @override
   void initState() {
     super.initState();
-    _fetchEnvs();
-  }
-
-  Future<void> _fetchEnvs() async {
-    final envs = await context.read<ScheduleRepository>().getEnvironments();
-    if (mounted) {
-      setState(() {
-        _environments = envs;
-        _loadingEnvs = false;
-      });
-    }
+    // Load data for the already selected active environment
+    context.read<ScheduleBloc>().add(LoadInitialData());
   }
 
   @override
@@ -44,9 +36,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
       appBar: AppBar(
         title: Row(
           children: [
-            const Icon(Icons.rocket_launch_rounded, color: AppTheme.aiGlow),
+            Image.asset(
+              'assets/logo.png',
+              height: 50,
+              filterQuality: FilterQuality.high,
+            ),
             const SizedBox(width: 12),
             Text("TIMEPLANNER AI", style: Theme.of(context).appBarTheme.titleTextStyle),
+            const SizedBox(width: 8),
+            IconButton(
+              icon: const Icon(Icons.logout_rounded, color: Colors.white38, size: 20),
+              tooltip: "Torna alla selezione azienda",
+              onPressed: () async {
+                await SecurityUtils.setActiveEnvironment("");
+                if (mounted) {
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(builder: (context) => const CompanySelectionScreen()),
+                  );
+                }
+              },
+            ),
           ],
         ),
         actions: [
@@ -74,12 +84,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
             },
           ),
           IconButton(
+            icon: const Icon(Icons.psychology_rounded, color: AppTheme.aiGlow),
+            tooltip: "Neural Engine Monitor",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => AiEngineMonitorScreen(
+                  repository: context.read<ScheduleRepository>()
+                )),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.tune_rounded, color: AppTheme.textPrimary),
             tooltip: "Demand Settings",
             onPressed: () {
               showDialog(
                 context: context,
                 builder: (context) => const DemandSettingsDialog(),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.work_outline, color: AppTheme.aiGlow),
+            tooltip: "Gestione Commesse",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const JobsManagementScreen()),
               );
             },
           ),
@@ -116,41 +148,69 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text("COMPANY / ENV", style: Theme.of(context).textTheme.titleSmall?.copyWith(color: AppTheme.textSecondary, letterSpacing: 1.5)),
+                      const SizedBox(height: 32),
+                      Text("ACTIVE COMPANY", style: Theme.of(context).textTheme.titleSmall?.copyWith(color: AppTheme.textSecondary, letterSpacing: 1.5)),
                       const SizedBox(height: 12),
-                      _loadingEnvs 
-                        ? const LinearProgressIndicator(color: AppTheme.aiGlow)
-                        : Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
-                            decoration: BoxDecoration(
-                              color: Colors.white.withOpacity(0.05),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: DropdownButtonHideUnderline(
-                              child: DropdownButton<String>(
-                                value: SecurityUtils.activeEnvironment,
-                                dropdownColor: const Color(0xFF1E1B4B),
-                                isExpanded: true,
-                                icon: const Icon(Icons.business_rounded, color: AppTheme.aiGlow),
-                                items: _environments.map((env) {
-                                  return DropdownMenuItem(
-                                    value: env,
-                                    child: Text(env, style: const TextStyle(color: Colors.white, fontSize: 13)),
-                                  );
-                                }).toList(),
-                                onChanged: (val) {
-                                  if (val != null) {
-                                    setState(() => SecurityUtils.activeEnvironment = val);
-                                    context.read<ScheduleBloc>().add(LoadInitialData());
-                                  }
-                                },
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: AppTheme.aiGlow.withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppTheme.aiGlow.withOpacity(0.1)),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.business_rounded, color: AppTheme.aiGlow, size: 20),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                SecurityUtils.activeEnvironment,
+                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                          ),
+                            IconButton(
+                              icon: const Icon(Icons.swap_horiz_rounded, color: Colors.white60, size: 20),
+                              onPressed: () {
+                                Navigator.pushReplacement(
+                                  context,
+                                  MaterialPageRoute(builder: (context) => const CompanySelectionScreen()),
+                                );
+                              },
+                              tooltip: "Change Company",
+                            ),
+                          ],
+                        ),
+                      ),
                       const SizedBox(height: 32),
                       const AiMonitorWidget(),
                       const Spacer(),
                       
+                      const SizedBox(height: 12),
+                      
+                      // Comparison Access
+                      InkWell(
+                        onTap: () => Navigator.push(
+                          context, 
+                          MaterialPageRoute(builder: (_) => ScheduleComparisonScreen(repository: context.read<ScheduleRepository>()))
+                        ),
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.white10),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.compare_arrows_rounded, size: 18, color: AppTheme.aiGlow),
+                              const SizedBox(width: 8),
+                              Text("Analisi & Confronto", style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
                       // Developer Access
                       InkWell(
                         onTap: () => Navigator.push(
@@ -204,13 +264,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                                 ),
                               ),
                               const SizedBox(height: 32),
-                              const Text(
-                                "AI sta lavorando...",
-                                style: TextStyle(
+                              Text(
+                                state.message ?? "AI sta lavorando...",
+                                style: const TextStyle(
                                   color: AppTheme.textPrimary,
-                                  fontSize: 24,
+                                  fontSize: 22,
                                   fontWeight: FontWeight.bold,
                                 ),
+                                textAlign: TextAlign.center,
                               ),
                               const SizedBox(height: 12),
                               Text(
@@ -259,7 +320,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               context.read<ScheduleBloc>().add(
                 GenerateSchedules(
                   DateTime.now(), 
-                  DateTime.now().add(const Duration(days: 7))
+                  DateTime.now().add(const Duration(days: 28)) // Full 4-week cycle
                 )
               );
             },

@@ -1,5 +1,6 @@
 import 'dart:ui';
-import 'package:flutter/services.dart'; // Added for HapticFeedback
+import 'package:intl/intl.dart';
+import 'package:flutter/services.dart'; 
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'dart:async'; // Added for Timer
@@ -50,9 +51,20 @@ class _CalendarGridState extends State<CalendarGrid> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    final employees = state.employees;
-    final unavailabilities = state.unavailabilities;
+    final s = state;
+    final activeEmployees = s.employees.where((e) => e.hasHistory).toList();
+    
+    final unavailabilities = s.unavailabilities;
     final List<dynamic> shifts = widget.scheduleData['schedule'] ?? [];
+
+    // Calculate Week Start for real dates
+    DateTime weekStart = DateTime.now().subtract(Duration(days: DateTime.now().weekday - 1));
+    if (shifts.isNotEmpty) {
+      try {
+        final firstDate = DateTime.parse(shifts.first['date']);
+        weekStart = firstDate.subtract(Duration(days: firstDate.weekday - 1));
+      } catch (_) {}
+    }
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 100, 20, 20),
@@ -64,21 +76,18 @@ class _CalendarGridState extends State<CalendarGrid> {
             filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
             child: Stack(
               children: [
-                // 1. The Living Grid: Heatmap Background
                 Positioned.fill(
                   child: CustomPaint(
                     painter: HeatmapPainter(
                       shifts: shifts,
-                      config: state.demandConfig,
+                      config: s.demandConfig,
                     ),
                   ),
                 ),
                 
-                // 2. Content
                 SingleChildScrollView(
                   child: Column(
                     children: [
-                      // Modern Header Row
                       Container(
                         padding: const EdgeInsets.symmetric(vertical: 24),
                         decoration: BoxDecoration(
@@ -87,192 +96,32 @@ class _CalendarGridState extends State<CalendarGrid> {
                         ),
                         child: Row(
                           children: [
-                            SizedBox(width: 120, child: Center(child: Text("EMPLOYEE", style: TextStyle(color: AppTheme.textSecondary, fontWeight: FontWeight.w900, fontSize: 10, letterSpacing: 1.5)))),
-                            for (var day in days) 
-                              Expanded(child: Center(child: Text(day.toUpperCase(), style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 2, fontSize: 11, color: AppTheme.textPrimary)))),
-                          ],
-                        ),
-                      ),
-                      // Employee Rows
-                      for (var emp in employees)
-                        Container(
-                          decoration: BoxDecoration(
-                            border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.04))),
-                          ),
-                          child: Row(
-                            children: [
-                              Draggable<String>(
-                                data: emp.id,
-                                feedback: Material(
-                                  color: Colors.transparent,
-                                  child: Container(
-                                    width: 120,
-                                    height: 50,
-                                    decoration: BoxDecoration(
-                                      color: AppTheme.surface,
-                                      borderRadius: BorderRadius.circular(12),
-                                      boxShadow: [BoxShadow(color: AppTheme.primary.withOpacity(0.4), blurRadius: 20)],
-                                    ),
-                                    alignment: Alignment.center,
-                                    child: Text(emp.name, style: TextStyle(fontWeight: FontWeight.w800, color: AppTheme.textPrimary, decoration: TextDecoration.none, fontSize: 14)),
-                                  ),
-                                ),
-                                childWhenDragging: Opacity(opacity: 0.3, child: Container(
-                                  width: 120,
-                                  height: 90,
-                                  alignment: Alignment.center,
+                            SizedBox(width: 140, child: Center(child: Text("EMPLOYEE", style: TextStyle(color: AppTheme.textSecondary, fontWeight: FontWeight.w900, fontSize: 10, letterSpacing: 1.5)))),
+                            for (int i = 0; i < 7; i++) 
+                              Expanded(
+                                child: Center(
                                   child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      Text(emp.name, style: TextStyle(fontWeight: FontWeight.w800, color: AppTheme.textPrimary, fontSize: 14)),
-                                      if (emp.roles.isNotEmpty)
-                                        Text(emp.roles.first.toUpperCase(), style: TextStyle(color: AppTheme.textSecondary, fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 1)),
-                                    ],
-                                  ),
-                                )),
-                                child: Container(
-                                  width: 120,
-                                  height: 90,
-                                  alignment: Alignment.center,
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Text(emp.name, style: TextStyle(fontWeight: FontWeight.w800, color: AppTheme.textPrimary, fontSize: 14)),
-                                      if (emp.roles.isNotEmpty)
-                                        Text(emp.roles.first.toUpperCase(), style: TextStyle(color: AppTheme.textSecondary, fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 1)),
+                                      Text(
+                                        DateFormat('EEE').format(weekStart.add(Duration(days: i))).toUpperCase(),
+                                        style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 1.5, fontSize: 10, color: AppTheme.textPrimary.withOpacity(0.7)),
+                                      ),
+                                      Text(
+                                        DateFormat('dd/MM').format(weekStart.add(Duration(days: i))),
+                                        style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13, color: AppTheme.textPrimary),
+                                      ),
                                     ],
                                   ),
                                 ),
                               ),
-                              for (int d = 0; d < 7; d++)
-                                Expanded(
-                                  child: GestureDetector(
-                                    onLongPress: () {
-                                      final baseDate = DateTime.parse("2024-01-01"); 
-                                      final targetDate = baseDate.add(Duration(days: d));
-                                      context.read<ScheduleBloc>().add(ToggleUnavailability(emp.id, targetDate));
-                                    },
-                                    child: DragTarget<String>(
-                                      onWillAccept: (droppedId) {
-                                        if (droppedId == null) return false;
-                                        final droppedEmp = employees.firstWhere((e) => e.id == droppedId, orElse: () => emp);
-                                        
-                                        final cellShifts = shifts.where((s) {
-                                          try {
-                                            if (s['date'] == null) return false;
-                                            final shiftDate = DateTime.parse(s['date']);
-                                            final weekday = shiftDate.weekday; 
-                                            return s['employee_id'] == emp.id && (weekday - 1) == d;
-                                          } catch (e) { return false; }
-                                        }).toList();
-
-                                        if (cellShifts.isNotEmpty) {
-                                          final requiredRole = cellShifts.first['role'];
-                                          final matches = droppedEmp.roles.contains(requiredRole) || droppedEmp.role == requiredRole;
-                                          
-                                          if (matches) {
-                                            HapticFeedback.lightImpact(); 
-                                          } else {
-                                            HapticFeedback.heavyImpact(); 
-                                          }
-                                        }
-                                        return true;
-                                      },
-                                      onAccept: (droppedId) {
-                                        HapticFeedback.selectionClick();
-                                        context.read<ScheduleRepository>().logFeedback(
-                                          shiftId: "drag_${emp.id}_$d",
-                                          droppedEmployeeId: droppedId,
-                                          replacedEmployeeId: emp.id,
-                                          shiftStart: DateTime.now(),
-                                          role: "Role",
-                                        );
-                                        // Show Synapse Feedback
-                                        _triggerToast("Preferenza Salvata! 🧠");
-                                      },
-                                      builder: (context, candidates, rejects) {
-                                        final dateStr = DateTime.parse("2024-01-01").add(Duration(days: d)).toIso8601String().split('T')[0];
-                                        final isUnavailable = unavailabilities.any((u) => u['employee_id'] == emp.id && u['date'] == dateStr);
-
-                                        final cellShifts = shifts.where((s) {
-                                          try {
-                                            if (s['date'] == null) return false;
-                                            final shiftDate = DateTime.parse(s['date']);
-                                            final weekday = shiftDate.weekday; 
-                                            final gridDayIdx = (weekday - 1); 
-                                            return s['employee_id'] == emp.id && gridDayIdx == d;
-                                          } catch (e) {
-                                            return false;
-                                          }
-                                        }).toList();
-                                        
-                                        // Interaction Feedback
-                                        Color borderColor = Colors.white.withOpacity(0.05);
-                                        Color bgColor = isUnavailable 
-                                              ? Colors.red.withOpacity(0.08)
-                                              : (candidates.isNotEmpty ? AppTheme.primary.withOpacity(0.2) : Colors.transparent);
-                                        double scale = 1.0;
-
-                                        if (candidates.isNotEmpty) {
-                                            final StringDroppedId = candidates.first!;
-                                            final droppedEmp = employees.firstWhere((e) => e.id == StringDroppedId, orElse: () => emp);
-                                            
-                                            bool isMatch = true;
-                                            if (cellShifts.isNotEmpty) {
-                                                final requiredRole = cellShifts.first['role'];
-                                                isMatch = droppedEmp.roles.contains(requiredRole) || droppedEmp.role == requiredRole;
-                                            }
-                                            
-                                            if (isMatch) {
-                                                // Attraction
-                                                borderColor = Colors.greenAccent.withOpacity(0.8);
-                                                bgColor = Colors.greenAccent.withOpacity(0.1);
-                                                scale = 1.05;
-                                            } else {
-                                                // Resistance
-                                                borderColor = Colors.redAccent.withOpacity(0.8);
-                                                bgColor = Colors.redAccent.withOpacity(0.1);
-                                                scale = 0.95;
-                                            }
-                                        }
-
-                                        return Transform.scale(
-                                          scale: scale,
-                                          child: Container(
-                                            height: 90,
-                                            margin: const EdgeInsets.all(6),
-                                            decoration: BoxDecoration(
-                                              color: bgColor,
-                                              borderRadius: BorderRadius.circular(14),
-                                              border: Border.all(
-                                                color: isUnavailable ? Colors.red.withOpacity(0.2) : borderColor,
-                                                width: candidates.isNotEmpty ? 2 : 1,
-                                              ),
-                                            ),
-                                            child: Center(
-                                              child: isUnavailable
-                                                ? const Text("OFF", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w900, fontSize: 9, letterSpacing: 1))
-                                                : (cellShifts.isEmpty 
-                                                    ? const SizedBox()
-                                                    : Column(
-                                                        mainAxisAlignment: MainAxisAlignment.center,
-                                                        children: cellShifts.map((s) => ShiftCard(
-                                                          label: s['role'] ?? "Role",
-                                                          startTime: s['start_time'],
-                                                          endTime: s['end_time'],
-                                                          affinity: s['affinity']?.toDouble(),
-                                                        )).toList(),
-                                                      )),
-                                            ),
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
+                          ],
                         ),
+                      ),
+                      
+                      if (activeEmployees.isNotEmpty)
+                        for (var emp in activeEmployees)
+                          _buildEmployeeRow(emp, shifts, unavailabilities, s.employees, s, days, weekStart),
                     ],
                   ),
                 ),
@@ -282,6 +131,156 @@ class _CalendarGridState extends State<CalendarGrid> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title, BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      color: Colors.white.withOpacity(0.02),
+      child: Text(title, style: TextStyle(color: AppTheme.textSecondary.withOpacity(0.3), fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 1.5)),
+    );
+  }
+
+  Widget _buildEmployeeRow(Employment emp, List<dynamic> shifts, List unavailabilities, List<Employment> employees, ScheduleLoaded state, List<String> days, DateTime weekStart) {
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.04))),
+      ),
+      child: Row(
+        children: [
+          // Sidebar: Employee Name
+          SizedBox(
+            width: 140,
+            height: 100,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircleAvatar(
+                  radius: 14,
+                  backgroundColor: AppTheme.accent.withOpacity(0.1),
+                  child: Text(emp.fullName.isNotEmpty ? emp.fullName[0] : "?", style: const TextStyle(color: AppTheme.accent, fontSize: 10, fontWeight: FontWeight.bold)),
+                ),
+                const SizedBox(height: 6),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(
+                    emp.fullName.split(' ').first,
+                    style: const TextStyle(color: AppTheme.textPrimary, fontSize: 10, fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  emp.role.toUpperCase(),
+                  style: TextStyle(color: AppTheme.textSecondary, fontSize: 7, fontWeight: FontWeight.w900, letterSpacing: 0.5),
+                ),
+              ],
+            ),
+          ),
+          // Calendar Cells
+          for (int d = 0; d < 7; d++)
+            Expanded(
+              child: Container(
+                height: 100,
+                decoration: BoxDecoration(
+                  border: Border(left: BorderSide(color: Colors.white.withOpacity(0.04))),
+                ),
+                child: DragTarget<Map<String, dynamic>>(
+                  onWillAccept: (droppedShift) => true,
+                  onAccept: (droppedShift) {
+                    HapticFeedback.selectionClick();
+                    final dateStr = weekStart.add(Duration(days: d));
+                    context.read<ScheduleBloc>().add(UpdateShift(
+                      shift: droppedShift, 
+                      newDate: dateStr, 
+                      newEmployeeId: emp.id
+                    ));
+                    _triggerToast("Preferenza Salvata! 🧠");
+                  },
+                  builder: (context, candidates, rejects) {
+                    final cellDate = weekStart.add(Duration(days: d));
+                    final dateStr = cellDate.toIso8601String().split('T')[0];
+                    final isUnavailable = unavailabilities.any((u) => u['employee_id'] == emp.id && u['date'] == dateStr);
+
+                    final cellShifts = shifts.where((s) {
+                      try {
+                        if (s['date'] == null) return false;
+                        final shiftDate = DateTime.parse(s['date']);
+                        return s['employee_id'] == emp.id && shiftDate.year == cellDate.year && shiftDate.month == cellDate.month && shiftDate.day == cellDate.day;
+                      } catch (e) { return false; }
+                    }).toList();
+                    
+                    final hasHistory = state.historicalSchedules.any((hp) {
+                      return hp['employee_id'] == emp.id && hp['date'] == dateStr;
+                    });
+
+                    Color borderColor = hasHistory ? Colors.amber.withOpacity(0.4) : Colors.white.withOpacity(0.05);
+                    Color bgColor = isUnavailable 
+                          ? Colors.red.withOpacity(0.08)
+                          : (candidates.isNotEmpty ? AppTheme.primary.withOpacity(0.2) : Colors.transparent);
+                    double scale = candidates.isNotEmpty ? 1.05 : 1.0;
+
+                    return Transform.scale(
+                      scale: scale,
+                      child: Container(
+                        height: 90,
+                        constraints: const BoxConstraints(minHeight: 100),
+                        decoration: BoxDecoration(
+                          color: bgColor,
+                          border: Border.all(color: borderColor),
+                        ),
+                        child: Stack(
+                          children: [
+                            if (hasHistory)
+                              Positioned(
+                                top: 4,
+                                right: 4,
+                                child: Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: Colors.amber, 
+                                    shape: BoxShape.circle,
+                                    boxShadow: [BoxShadow(color: Colors.amber.withOpacity(0.4), blurRadius: 4)],
+                                  ),
+                                ),
+                              ),
+                            Center(
+                              child: isUnavailable
+                                ? const Text("OFF", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w900, fontSize: 9))
+                                : (cellShifts.isEmpty 
+                                    ? const SizedBox()
+                                    : Column(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: cellShifts.map((s) {
+                                          final hist = state.historicalSchedules.firstWhere(
+                                            (hp) => hp['employee_id'] == emp.id && hp['date'] == dateStr,
+                                            orElse: () => null
+                                          );
+                                          String? histTime;
+                                          if (hist != null) {
+                                            histTime = "${hist['tmentry']} - ${hist['tmexit']}";
+                                          }
+                                          return ShiftCard(
+                                            shift: s,
+                                            affinity: s['affinity']?.toDouble(),
+                                            historicalTime: histTime,
+                                            activities: state.activities,
+                                          );
+                                        }).toList(),
+                                      )),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

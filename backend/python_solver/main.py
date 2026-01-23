@@ -1,7 +1,7 @@
 import os
 import firebase_admin
 from firebase_admin import credentials, firestore
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from routers import schedule, training, ingestion, agent, reports, learning
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -17,14 +17,27 @@ except ValueError:
 
 app = FastAPI(title="TimePlanner AI Agent API")
 
-# Enable CORS for Flutter Web
+# Enable CORS for Flutter Web - Explicit headers for stability
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False, # Must be False if allow_origins is ["*"]
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "X-HMAC-Signature", "Environment", "Authorization"],
+    expose_headers=["*"],
 )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"DEBUG: Incoming {request.method} {request.url.path}")
+    try:
+        response = await call_next(request)
+        print(f"DEBUG: Response status: {response.status_code}")
+        return response
+    except Exception as e:
+        print(f"CRITICAL: Middleware caught exception: {e}")
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=500, content={"detail": str(e)})
 
 app.include_router(schedule.router)
 app.include_router(training.router)

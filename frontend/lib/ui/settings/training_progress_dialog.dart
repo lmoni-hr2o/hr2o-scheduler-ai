@@ -14,7 +14,7 @@ class TrainingProgressDialog extends StatefulWidget {
       context: context,
       barrierDismissible: false,
       builder: (context) => TrainingProgressDialog(
-        onStart: context.read<ScheduleRepository>().triggerRetraining,
+        onStart: context.read<ScheduleRepository>().retrain,
       ),
     );
   }

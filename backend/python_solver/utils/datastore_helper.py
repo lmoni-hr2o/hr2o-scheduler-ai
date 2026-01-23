@@ -14,8 +14,10 @@ class DatastoreClient:
     """Wrapper around Datastore client to mimic Firestore API"""
     
     def __init__(self, namespace: Optional[str] = None):
-        # Priority: 1. Constructor arg, 2. Env var, 3. None (default)
-        self.namespace = namespace or os.getenv("DATASTORE_NAMESPACE")
+        if namespace is not None:
+            self.namespace = namespace
+        else:
+            self.namespace = os.getenv("DATASTORE_NAMESPACE")
         self.client = datastore.Client(namespace=self.namespace)
         print(f"DEBUG: Initialized DatastoreClient with namespace: {self.namespace}")
     
@@ -41,6 +43,14 @@ class DatastoreClient:
             doc = current.doc(parts[i+1])
             
         return doc
+
+    def key(self, *args, **kwargs):
+        """Proxy to native datastore.Client.key"""
+        return self.client.key(*args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        """Proxy to native datastore.Client.get"""
+        return self.client.get(*args, **kwargs)
 
     def batch(self):
         """Returns a batch object for batched writes"""

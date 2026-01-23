@@ -2,54 +2,87 @@ class Activity {
   final String id;
   final String name;
   final String? color;
+  final Map<String, dynamic>? project; // Project/customer info
 
-  Activity({required this.id, required this.name, this.color});
+  Activity({
+    required this.id,
+    required this.name,
+    this.color,
+    this.project,
+  });
 
   factory Activity.fromJson(Map<String, dynamic> json) {
     return Activity(
-      id: json['id'] as String,
-      name: json['name'] as String,
+      id: json['id']?.toString() ?? '',
+      name: json['name'] as String? ?? 'Unknown Activity',
       color: json['color'] as String?,
+      project: json['project'] as Map<String, dynamic>?,
     );
   }
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
-    'color': color,
+    if (color != null) 'color': color,
+    if (project != null) 'project': project,
   };
 }
 
 class Employment {
   final String id;
-  final String name;
+  final String name; // Company Name
+  final String fullName; // Person Name
   final String role;
   final int? contractHours;
+  final bool hasHistory;
+  final List<String> projectIds;
+  final List<String> customerKeywords;
+  final String? address;
+  final String? bornDate;
 
   Employment({
     required this.id, 
     required this.name, 
+    required this.fullName,
     required this.role,
     this.contractHours,
+    this.hasHistory = false,
+    this.projectIds = const [],
+    this.customerKeywords = const [],
+    this.address,
+    this.bornDate,
   });
 
-  // Getter for compatibility with existing UI that might check emp.roles.isNotEmpty
   List<String> get roles => [role];
 
   factory Employment.fromJson(Map<String, dynamic> json) {
     return Employment(
-      id: json['id'] as String,
-      name: json['name'] as String,
-      role: json['role'] as String? ?? (json['roles'] != null && (json['roles'] as List).isNotEmpty ? json['roles'][0] : "worker"),
-      contractHours: json['contract_hours'] as int?,
+      id: json['id']?.toString() ?? '',
+      name: json['name'] as String? ?? "Unknown Company",
+      fullName: json['fullName'] as String? ?? "Unknown Employee",
+      role: json['role'] as String? ?? "worker",
+      contractHours: json['contract_hours'] is int 
+          ? json['contract_hours'] 
+          : int.tryParse(json['contract_hours']?.toString() ?? ''),
+      hasHistory: json['has_history'] as bool? ?? false,
+      projectIds: (json['project_ids'] as List?)?.map((e) => e.toString()).toList() ?? [],
+      customerKeywords: (json['customer_keywords'] as List?)?.map((e) => e.toString()).toList() ?? [],
+      address: json['address'] as String?,
+      bornDate: json['bornDate'] as String?,
     );
   }
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
+    'fullName': fullName,
     'role': role,
     'contract_hours': contractHours,
+    'has_history': hasHistory,
+    'project_ids': projectIds,
+    'customer_keywords': customerKeywords,
+    'address': address,
+    'bornDate': bornDate,
   };
 }
 
@@ -72,9 +105,9 @@ class Period {
 
   factory Period.fromJson(Map<String, dynamic> json) {
     return Period(
-      id: json['id'] as String?,
-      employeeId: json['employee_id'] as String,
-      activityId: json['activity_id'] as String,
+      id: json['id']?.toString(),
+      employeeId: json['employee_id']?.toString() ?? '',
+      activityId: json['activity_id']?.toString() ?? '',
       tmregister: DateTime.parse(json['tmregister']),
       tmentry: DateTime.parse(json['tmentry']),
       tmexit: DateTime.parse(json['tmexit']),
@@ -95,18 +128,27 @@ class DemandConfig {
   final int weekdayTarget;
   final int weekendTarget;
   final bool aiEnabled;
+  final Map<String, dynamic>? profile;
 
   const DemandConfig({
     this.weekdayTarget = 3,
     this.weekendTarget = 2,
     this.aiEnabled = true,
+    this.profile,
   });
 
   factory DemandConfig.fromJson(Map<String, dynamic> json) {
+    int parseSafe(dynamic v, int def) {
+      if (v is int) return v;
+      if (v is String) return int.tryParse(v) ?? def;
+      return def;
+    }
+
     return DemandConfig(
-      weekdayTarget: json['weekdayTarget'] ?? 3,
-      weekendTarget: json['weekendTarget'] ?? 2,
+      weekdayTarget: parseSafe(json['weekdayTarget'], 3),
+      weekendTarget: parseSafe(json['weekendTarget'], 2),
       aiEnabled: json['aiEnabled'] ?? true,
+      profile: json['profile'] as Map<String, dynamic>?,
     );
   }
 
@@ -115,6 +157,7 @@ class DemandConfig {
       'weekdayTarget': weekdayTarget,
       'weekendTarget': weekendTarget,
       'aiEnabled': aiEnabled,
+      if (profile != null) 'profile': profile,
     };
   }
 
@@ -122,11 +165,13 @@ class DemandConfig {
     int? weekdayTarget,
     int? weekendTarget,
     bool? aiEnabled,
+    Map<String, dynamic>? profile,
   }) {
     return DemandConfig(
       weekdayTarget: weekdayTarget ?? this.weekdayTarget,
       weekendTarget: weekendTarget ?? this.weekendTarget,
       aiEnabled: aiEnabled ?? this.aiEnabled,
+      profile: profile ?? this.profile,
     );
   }
 }
