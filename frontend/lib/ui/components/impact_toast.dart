@@ -13,25 +13,28 @@ class ImpactToast extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedPositioned(
-      duration: const Duration(milliseconds: 600),
-      curve: Curves.elasticOut,
-      bottom: isVisible ? 32 : -100,
-      left: 0,
-      right: 0,
-      child: Center(
-        child: AnimatedOpacity(
-          duration: const Duration(milliseconds: 300),
-          opacity: isVisible ? 1.0 : 0.0,
+    return const SizedBox.shrink(); // This widget is mainly used via the static show() method
+  }
+
+  static void show(BuildContext context, String message, {bool isError = false}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        behavior: SnackBarBehavior.floating,
+        content: Center(
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
             decoration: BoxDecoration(
               color: AppTheme.surface.withOpacity(0.9),
               borderRadius: BorderRadius.circular(30),
-              border: Border.all(color: AppTheme.aiGlow.withOpacity(0.5), width: 1.5),
+              border: Border.all(
+                color: (isError ? Colors.redAccent : AppTheme.aiGlow).withOpacity(0.5), 
+                width: 1.5,
+              ),
               boxShadow: [
                 BoxShadow(
-                  color: AppTheme.aiGlow.withOpacity(0.3),
+                  color: (isError ? Colors.redAccent : AppTheme.aiGlow).withOpacity(0.2),
                   blurRadius: 20,
                   offset: const Offset(0, 4),
                 ),
@@ -40,7 +43,11 @@ class ImpactToast extends StatelessWidget {
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.auto_awesome, color: AppTheme.aiGlow, size: 20),
+                Icon(
+                  isError ? Icons.error_outline_rounded : Icons.auto_awesome, 
+                  color: isError ? Colors.redAccent : AppTheme.aiGlow, 
+                  size: 20,
+                ),
                 const SizedBox(width: 12),
                 Text(
                   message,

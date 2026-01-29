@@ -13,6 +13,8 @@ import 'settings/ai_engine_monitor_screen.dart';
 import 'jobs_management_screen.dart';
 import 'company_selection_screen.dart';
 import 'schedule_comparison_screen.dart';
+import 'settings/labor_profiles_screen.dart';
+import 'employees_management_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -106,6 +108,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
             },
           ),
           IconButton(
+            icon: const Icon(Icons.people_outline_rounded, color: AppTheme.aiGlow),
+            tooltip: "Gestione Dipendenti",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const EmployeesManagementScreen()),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.work_outline, color: AppTheme.aiGlow),
             tooltip: "Gestione Commesse",
             onPressed: () {
@@ -188,6 +200,31 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       
                       const SizedBox(height: 12),
                       
+                      const SizedBox(height: 12),
+                      
+                      // Labor Profiles Access
+                      InkWell(
+                        onTap: () => Navigator.push(
+                          context, 
+                          MaterialPageRoute(builder: (_) => const LaborProfilesScreen())
+                        ),
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.white10),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.gavel_rounded, size: 18, color: Colors.orangeAccent),
+                              const SizedBox(width: 8),
+                              Text("Profili Normativi", style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+
                       // Comparison Access
                       InkWell(
                         onTap: () => Navigator.push(

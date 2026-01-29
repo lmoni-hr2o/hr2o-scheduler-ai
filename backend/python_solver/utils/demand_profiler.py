@@ -23,19 +23,41 @@ class DemandProfiler:
 
         for p in raw_periods:
             try:
+                # Helper for flat/nested keys
+                def get_val(d, keys_chain):
+                    flat_key = ".".join(keys_chain)
+                    if flat_key in d:
+                        val = d[flat_key]
+                        if isinstance(val, list) and len(val) > 0: return val[0]
+                        return val
+                    curr = d
+                    for k in keys_chain:
+                        if isinstance(curr, dict) and k in curr:
+                            curr = curr[k]
+                        else:
+                            return None
+                    return curr
+
                 act_data = p.get("activities", {})
-                act_id = str(p.get("_entity_id_activity", "")) or str(act_data.get("id", ""))
+                # Try nested ID first, then flat ID
+                act_id = str(p.get("_entity_id_activity", "")) or \
+                         str(act_data.get("id", "")) or \
+                         str(get_val(p, ["activities", "id"])) or \
+                         str(get_val(p, ["activities", "code"]))
+                
                 if not act_id or act_id == "None": continue
                 
-                tmregister = p.get("tmregister")
+                # Time extraction (flat keys common in these imports)
+                tmregister = p.get("tmregister") or get_val(p, ["beginTimePlace", "tmregister"])
                 reg_dt = parse_date(tmregister)
                 if not reg_dt: continue
                 
                 dow = str(reg_dt.weekday())
                 date_iso = reg_dt.date().isoformat()
                 
-                tmentry = p.get("tmentry")
-                tmexit = p.get("tmexit")
+                tmentry = p.get("tmentry") or get_val(p, ["beginTimePlace", "tmregister"]) # Fallback to register if entry missing
+                tmexit = p.get("tmexit") or get_val(p, ["endTimePlace", "tmregister"]) or p.get("endTimePlan")
+                
                 if not tmentry or not tmexit: continue
                 
                 def to_hm(t):
@@ -46,18 +68,31 @@ class DemandProfiler:
 
                 start_hm = to_hm(tmentry)
                 end_hm = to_hm(tmexit)
+
+                # Get role (prefer Activity name as it often describes the 'task' role, or fallback to employment role)
+                role_name = str(act_data.get("name") or \
+                                get_val(p, ["activities", "name"]) or \
+                                get_val(p, ["activities", "description"]) or \
+                                get_val(p, ["activities", "project", "description"]) or \
+                                p.get("role") or \
+                                "worker").strip().upper()
                 
-                key = (act_id, dow)
+                key = (act_id, dow, role_name)
                 if key not in history: history[key] = {}
                 if date_iso not in history[key]: history[key][date_iso] = []
                 
                 history[key][date_iso].append((start_hm, end_hm))
-            except: continue
+            except Exception as e: 
+                print(f"DEBUG: Profiler internal error: {e}")
+                continue
 
-        # 2. Extract "Typical" Days for each (act, dow)
+        def norm_role(r):
+            return str(r or "worker").strip().upper()
+
+        # 2. Extract "Typical" Days for each (act, dow, role)
         final_profile = {}
         
-        for (act_id, dow), days_data in history.items():
+        for (act_id, dow, role_name), days_data in history.items():
             # A "Typical Day" is composed of several shifts (slots)
             # We want to find the most common set of slots.
             
@@ -87,7 +122,8 @@ class DemandProfiler:
                     typical_slots.append({
                         "start_time": start,
                         "end_time": end,
-                        "quantity": max(1, avg_qty)
+                        "quantity": max(1, avg_qty),
+                        "role": norm_role(role_name)
                     })
             
             if typical_slots:

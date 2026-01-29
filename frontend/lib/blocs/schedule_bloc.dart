@@ -168,7 +168,7 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
       _currentDemand = DemandConfig.fromJson(learned);
       
       // Auto-Learning: Trigger background retraining on app start/company change
-      repository.retrain(); 
+      // repository.retrain(); // DISABLED: Manual only to prevent loops 
       
       add(LoadSchedules());
     } catch (e) {
@@ -217,9 +217,10 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
       }
 
       // 1. Wait for AI Brain Synchronization (Global Learning)
-      emit(ScheduleLoading(message: "Sincronizzazione Cervello Globale..."));
+      // emit(ScheduleLoading(message: "Sincronizzazione Cervello Globale..."));
       
-      // Explicitly trigger retraining before generating, as requested
+      // DISABLED: User complained about infinite training loops. Manual retrain only.
+      /*
       try {
         await repository.retrain();
       } catch (e) {
@@ -244,6 +245,7 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
         await Future.delayed(const Duration(seconds: 1));
         attempts++;
       }
+      */
 
       // 2. Trigger Generation with updated brains
       emit(ScheduleLoading(message: "Ottimizzazione neurale in corso..."));

@@ -53,73 +53,67 @@ class Period(BaseModel):
 class Activity(BaseModel):
     id: str
     name: str
-    role_required: str = "worker" # Fallback if host API doesn't provide it
-    environment: str = "" # Injected by router
-    
-    # Additional fields from real API
-    project: Optional[Dict[str, Any]] = None
-    customer_address: Optional[str] = None
     code: Optional[str] = None
+    environment: str = ""
+    
+    # Details
+    customer_address: Optional[str] = None
+    project_id: Optional[str] = None
     note: Optional[str] = None
     typeActivity: Optional[str] = None
-    dtEnd: Optional[str] = None
-    type: Optional[str] = None
-    productivityType: Optional[str] = None
-    operations: Optional[List[Dict[str, Any]]] = None
-    selectVehicleRequired: bool = False
+    operations: Optional[List[Dict[str, Any]]] = None # Keep for detailed task analysis
+    
+    @field_validator('id', mode='before')
+    @classmethod
+    def transform_id(cls, v: Any) -> str:
+        return str(v)
 
     @field_validator('id', mode='before')
     @classmethod
     def transform_id(cls, v: Any) -> str:
         return str(v)
 
+class LaborProfile(BaseModel):
+    id: Optional[str] = None
+    name: str # e.g. "Part-Time 20h", "Full-Time Standard"
+    company_id: str # Owner
+    
+    # Constraints
+    max_weekly_hours: float = 40.0
+    max_daily_hours: float = 8.0
+    max_consecutive_days: int = 6
+    min_rest_hours: float = 11.0
+    
+    # Flags
+    is_default: bool = False
+    last_updated: datetime = Field(default_factory=datetime.now)
+
 class Employment(BaseModel):
     id: str
-    name: str = "Unknown Company" # Now represents Company Name
-    fullName: str = "Unknown Employee" # Now represents Person Name
+    name: str = "Unknown Company"
+    fullName: str = "Unknown Employee"
     role: str = "worker"
     environment: str = ""
-    preferences: Optional[List[float]] = Field(default_factory=list)
     
-    # Additional fields from real API
-    company: Optional[Dict[str, Any]] = None
-    person: Optional[Dict[str, Any]] = None
+    # Normalized Fields
     address: Optional[str] = None
     city: Optional[str] = None
     bornDate: Optional[str] = None
     dtHired: Optional[str] = None
     dtDismissed: Optional[str] = None
-    badge: Optional[Dict[str, Any]] = None
-    has_history: bool = False # Track if worker has real periods/activities
-    project_ids: List[str] = Field(default_factory=list) # Historical projects worked on
-    customer_keywords: List[str] = Field(default_factory=list) # Familiar customers (address/name)
+    
+    # System Flags
+    has_history: bool = False
+    labor_profile_id: Optional[str] = None
+    
+    # Learned Attributes (for Neural Scorer)
+    project_ids: List[str] = Field(default_factory=list)
+    customer_keywords: List[str] = Field(default_factory=list)
 
     @field_validator('id', mode='before')
     @classmethod
     def transform_id(cls, v: Any) -> str:
         return str(v)
-    
-    @field_validator('fullName', mode='before')
-    @classmethod
-    def extract_full_name(cls, v: Any, info) -> str:
-        """Extract person name from person.fullName if not provided directly"""
-        if v and v != "Unknown Employee":
-            return v
-        data = info.data if hasattr(info, 'data') else {}
-        if 'person' in data and isinstance(data['person'], dict):
-            return data['person'].get('fullName', 'Unknown Employee')
-        return "Unknown Employee"
-
-    @field_validator('name', mode='before')
-    @classmethod
-    def extract_company_name(cls, v: Any, info) -> str:
-        """Extract company name from company.name if not provided directly"""
-        if v and v != "Unknown Company":
-            return v
-        data = info.data if hasattr(info, 'data') else {}
-        if 'company' in data and isinstance(data['company'], dict):
-            return data['company'].get('name', 'Unknown Company')
-        return "Unknown Company"
 
 class AgentRequest(BaseModel):
     environment: str

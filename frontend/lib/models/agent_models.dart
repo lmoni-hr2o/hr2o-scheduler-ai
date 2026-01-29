@@ -39,6 +39,7 @@ class Employment {
   final List<String> customerKeywords;
   final String? address;
   final String? bornDate;
+  final String? laborProfileId;
 
   Employment({
     required this.id, 
@@ -51,6 +52,7 @@ class Employment {
     this.customerKeywords = const [],
     this.address,
     this.bornDate,
+    this.laborProfileId,
   });
 
   List<String> get roles => [role];
@@ -69,6 +71,7 @@ class Employment {
       customerKeywords: (json['customer_keywords'] as List?)?.map((e) => e.toString()).toList() ?? [],
       address: json['address'] as String?,
       bornDate: json['bornDate'] as String?,
+      laborProfileId: json['labor_profile_id']?.toString(),
     );
   }
 
@@ -83,7 +86,74 @@ class Employment {
     'customer_keywords': customerKeywords,
     'address': address,
     'bornDate': bornDate,
+    'labor_profile_id': laborProfileId,
   };
+}
+
+class LaborProfile {
+  final String id;
+  final String name;
+  final String companyId;
+  final double maxWeeklyHours;
+  final double maxDailyHours;
+  final int maxConsecutiveDays;
+  final double minRestHours;
+  final bool isDefault;
+
+  LaborProfile({
+    required this.id,
+    required this.name,
+    required this.companyId,
+    this.maxWeeklyHours = 40.0,
+    this.maxDailyHours = 8.0,
+    this.maxConsecutiveDays = 6,
+    this.minRestHours = 11.0,
+    this.isDefault = false,
+  });
+
+  factory LaborProfile.fromJson(Map<String, dynamic> json) {
+    return LaborProfile(
+      id: json['id']?.toString() ?? '',
+      name: json['name'] as String? ?? 'Standard',
+      companyId: json['company_id'] as String? ?? '',
+      maxWeeklyHours: (json['max_weekly_hours'] as num?)?.toDouble() ?? 40.0,
+      maxDailyHours: (json['max_daily_hours'] as num?)?.toDouble() ?? 8.0,
+      maxConsecutiveDays: json['max_consecutive_days'] as int? ?? 6,
+      minRestHours: (json['min_rest_hours'] as num?)?.toDouble() ?? 11.0,
+      isDefault: json['is_default'] as bool? ?? false,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'company_id': companyId,
+    'max_weekly_hours': maxWeeklyHours,
+    'max_daily_hours': maxDailyHours,
+    'max_consecutive_days': maxConsecutiveDays,
+    'min_rest_hours': minRestHours,
+    'is_default': isDefault,
+  };
+
+  LaborProfile copyWith({
+    String? name,
+    double? maxWeeklyHours,
+    double? maxDailyHours,
+    int? maxConsecutiveDays,
+    double? minRestHours,
+    bool? isDefault,
+  }) {
+    return LaborProfile(
+      id: this.id,
+      name: name ?? this.name,
+      companyId: this.companyId,
+      maxWeeklyHours: maxWeeklyHours ?? this.maxWeeklyHours,
+      maxDailyHours: maxDailyHours ?? this.maxDailyHours,
+      maxConsecutiveDays: maxConsecutiveDays ?? this.maxConsecutiveDays,
+      minRestHours: minRestHours ?? this.minRestHours,
+      isDefault: isDefault ?? this.isDefault,
+    );
+  }
 }
 
 class Period {

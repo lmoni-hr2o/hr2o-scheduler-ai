@@ -9,7 +9,7 @@ from solver.logger import save_log, get_all_logs
 from utils.security import verify_hmac
 import json
 from google.cloud import datastore
-from utils.mapping_helper import mapper
+# from utils.mapping_helper import mapper # Removed
 from datetime import datetime
 from utils.status_manager import update_status, get_status, set_running
 from utils.demand_profiler import DemandProfiler
@@ -65,41 +65,29 @@ def get_model_stats(environment: str = Depends(verify_hmac)):
 
 @router.get("/debug-mapper")
 def debug_mapper():
-    """Returns the internal state of the EnvironmentMapper without HMAC check."""
-    from utils.mapping_helper import mapper
-    # Add entity counts for debugging
-    entities_summary = {}
-    for company_name, lists in getattr(mapper, '_entities', {}).items():
-        entities_summary[company_name] = {
-            "Employment": len(lists.get("Employment", [])),
-            "Activity": len(lists.get("Activity", []))
-        }
-    
-    return {
-        "mappings": mapper._mappings,
-        "entities_summary": entities_summary,
-        "id_to_ns": getattr(mapper, '_id_to_ns', {}),
-        "last_refresh": mapper._last_refresh
-    }
+    """Deprecated."""
+    return {"status": "deprecated"}
 
 def discover_unique_environments():
-    """Returns all discovered companies from the cache with stats."""
-    all_mapped = mapper.get_all_companies()
+    """Returns all discovered companies from Datastore."""
     results = []
-    for c in all_mapped:
-        cid = c["id"]
-        lists = mapper._entities.get(cid, {})
-        ac = len(lists.get("Activity", []))
-        em = len(lists.get("Employment", []))
-        pe = len(lists.get("Period", []))
-        
-        results.append({
-            "id": cid,
-            "name": c["name"],
-            "namespace": mapper.get_namespace(cid),
-            "stats": {"activities": ac, "employees": em, "periods": pe},
-            "is_active": (ac > 0 and pe > 0) # User requirement: Activity AND Period
-        })
+    # Simple scan of known namespaces
+    for ns in ["OVERCLEAN", "OVERFLOW", "default"]:
+        try:
+            client = get_db(namespace=ns).client
+            # Fetch Companies
+            query = client.query(kind="Company")
+            for entity in query.fetch():
+                data = dict(entity)
+                # Handle numeric (id) or string (name) keys safely
+                safe_id = str(entity.key.id_or_name)
+                results.append({
+                    "id": safe_id,
+                    "name": data.get("name", safe_id),
+                    "namespace": ns,
+                    "is_active": True
+                })
+        except: pass
     return results
 
 @router.get("/environments")
@@ -108,315 +96,162 @@ def get_environments():
     envs = discover_unique_environments()
     return {"environments": envs, "count": len(envs)}
 
-@router.post("/log-feedback")
-def log_feedback(req: FeedbackRequest, environment: str = Depends(verify_hmac)):
-    """
-    Logs user corrections to Google Cloud Datastore.
-    """
-    save_log(req.action, req.selected_id, req.rejected_id, req.shift_data, environment)
-    return {"status": "success", "message": f"Feedback stored in Datastore for {environment}"}
-
 @router.on_event("startup")
 def startup_event():
-    """Initializes the EnvironmentMapper and triggers an initial Global Training in background."""
+    """Initializes the system."""
     import threading
-    print("Pre-warming EnvironmentMapper and triggering Initial Learning in background...")
-    
     # Safety: Clear any stale "running" locks from previous crashed instances
     set_running(False)
-    
-    def background_startup():
-        try:
-            # 1. Discover environments
-            mapper.discover_all()
-            # 2. Trigger initial training
-            print("INFO: Starting automatic startup training...")
-            run_global_training()
-        except Exception as e:
-            print(f"ERROR: Background startup task failed: {e}")
+    # We no longer trigger global training on startup to ensure fast cold boot
+    pass
 
-    threading.Thread(target=background_startup, daemon=True).start()
 
 def run_global_training():
     """
-    Background Task: Discovers environments from logs, aggregates data, and trains the Global Model.
+    Background Task: Global Training.
+    Discovers environments from Datastore and trains the model.
     """
     set_running(True)
     update_status(message="Starting Global AI Pipeline", progress=0.05, phase="MAPPING", log="Initializing Environment Ingestion Engine...")
     
     try:
-        # Warm up the mapper
-        update_status("Mapping namespaces and companies...", 0.1, log="Scanning Datastore namespaces [OVERCLEAN, OVERFLOW]...")
-        mapper.refresh_if_needed(force=True)
-        
-        # 1. Discover environments from LearningLog entities
-        update_status(log="Discovering environments from logs...")
-        
-        all_logs_entities = []
-        for ns in [None, "OVERCLEAN", "OVERFLOW"]:
-            client = get_db(namespace=ns).client
-            for kind in ['LearningLog', 'learning_log']:
-                try:
-                    results = list(client.query(kind=kind).fetch())
-                    if results:
-                        all_logs_entities.extend(results)
-                except: pass
-        
-        if not all_logs_entities:
-            print("INFO: No LearningLog entries found. Proceeding with historical training only.")
-            logs_by_primary_env = {}
-        else:
-            # Group logs by PRIMARY environment ID using the mapper
-            logs_by_primary_env = {}
-            for entity in all_logs_entities:
-                env_val = str(entity.get('environment'))
-                if not env_val: continue
-                
-                # Resolve to primary ID
-                primary_id = env_val
-                target_info = mapper._mappings.get(env_val) or next((v for v in mapper._mappings.values() if env_val in v.get("aliases", [])), None)
-                if target_info:
-                    # Find the primary key in mapper entries
-                    for k, v in mapper._mappings.items():
-                        if v == target_info:
-                            primary_id = k
-                            break
-                
-                if primary_id not in logs_by_primary_env:
-                    logs_by_primary_env[primary_id] = []
-                
-                log_dict = dict(entity)
-                if 'shift_data' in log_dict and isinstance(log_dict['shift_data'], str):
-                    try: log_dict['shift_data'] = json.loads(log_dict['shift_data'])
-                    except: pass
-                logs_by_primary_env[primary_id].append(log_dict)
+        # 1. Discover Environments via Helper
+        envs = discover_unique_environments()
+        if not envs:
+            print("INFO: No environments found for training.")
+            update_status("No data found.", 1.0, "IDLE")
+            set_running(False)
+            return
 
-        # 1. Discover Environments from Mapper
-        companies = mapper.get_all_companies()
-        company_ids = [c["id"] for c in companies]
-        total_p_envs = len(company_ids)
-        
-        # 1. Global Role Discovery (CRITICAL for consistent indexing)
-        update_status(log="Indexing global roles for feature consistency...")
-        all_roles_set = set()
-        for primary_id in company_ids:
-            try:
-                raw_employees = mapper.get_employment(primary_id)
-                raw_activities = mapper.get_activities(primary_id)
-                for e in raw_employees:
-                    all_roles_set.add(str((e.get("employment") or e).get("role", "worker")).strip().upper())
-                for a in raw_activities:
-                    all_roles_set.add(str((a.get("activities") or a).get("name", "Unknown")).strip().upper())
-            except: continue
-        
-        global_all_roles = sorted(list(all_roles_set))
-        print(f"DEBUG: Discovered {len(global_all_roles)} global roles: {global_all_roles}")
-
-        # 2. Iterate and Aggregate using cached metadata
+        # 2. Setup Scorer
         from utils.date_utils import parse_date, format_date_iso
+        from scorer.model import NeuralScorer
+        import numpy as np
+        
         scorer = NeuralScorer()
         scorer.load_weights()
         
         all_X = []
         all_y = []
-        processed_count = 0
-        total_samples = 0
+        total_p_envs = len(envs)
         
-        for i, primary_id in enumerate(company_ids):
+        # 3. Iterate and Aggregate
+        for i, env_meta in enumerate(envs):
+            primary_id = env_meta["id"]
+            ns = primary_id # The namespace IS the company ID now
+            
             update_status(
-                message=f"Processing {primary_id}",
-                progress=0.15 + (i / total_p_envs) * 0.6,
+                message=f"Training on {env_meta['name']}",
+                progress=0.1 + (i / total_p_envs) * 0.7,
                 phase="EXTRACTION",
-                log=f"Extracting features from company: {primary_id}...",
-                details={
-                    "envs_processed": i + 1,
-                    "processed_samples": len(all_X)
-                }
+                log=f"Extracting features from: {env_meta['name']} ({ns})..."
             )
             
             try:
-                # 0. Fetch Data Mappings for this environment
-                client = get_db()
-                k = client.key("DataMapping", primary_id)
-                mapping_entity = client.get(k)
-                env_mappings = mapping_entity.get("mappings") if mapping_entity else None
+                client = get_db(namespace=ns).client
                 
-                # Use CACHED metadata from mapper (instant)
-                raw_employees = mapper.get_employment(primary_id)
-                raw_activities = mapper.get_activities(primary_id)
-                raw_periods = mapper.get_periods(primary_id)
-                
-                # NEW: Learn Demand Profile (Times and Quantities)
-                profiler = DemandProfiler(primary_id)
-                profiler.learn_from_periods(raw_periods)
-                profiler.save_to_datastore()
-                
-                # Get manual logs if any (using company_id or aliases)
-                logs = logs_by_primary_env.get(primary_id, [])
-                info = mapper._mappings.get(primary_id, {})
-                for alias in info.get("aliases", []):
-                    if alias in logs_by_primary_env:
-                        logs.extend(logs_by_primary_env[alias])
-                
-                # Convert raw dicts to Activity/Employment objects
-                employees_list = []
-                for e in raw_employees:
-                    emp_data = (e.get("employment") or e)
-                    person = (emp_data.get("person") or {})
-                    # Use _entity_id as primary identifier
-                    emp_id = str(e.get("_entity_id", "")) or str(emp_data.get("id", "")) or str(e.get("id", ""))
-                    employees_list.append(Employment(
-                        id=emp_id,
-                        name=(emp_data.get("company") or {}).get("name", primary_id),
-                        fullName=person.get("fullName", "Unknown"),
-                        role=str(emp_data.get("role", "worker")).strip().upper(),
-                        environment=primary_id,
-                        person=person
-                    ))
+                # A. Fetch Employees
+                emp_query = client.query(kind="Employment")
+                valid_employees = {}
+                for e_entity in emp_query.fetch():
+                    ed = dict(e_entity)
+                    # Maps to internal model
+                    emp_obj = Employment(
+                        id=e_entity.key.name,
+                        name=ed.get("name"),
+                        fullName=ed.get("fullName"),
+                        role=ed.get("role", "worker"),
+                        environment=ns,
+                        address=ed.get("address"),
+                        city=ed.get("city"),
+                        bornDate=ed.get("bornDate"),
+                        dtHired=ed.get("dtHired")
+                    )
+                    valid_employees[e_entity.key.name] = emp_obj.dict()
 
-                emp_map = {e.id: e.dict() for e in employees_list}
-                
-                # NEW: Build project/client history for each employee for Project Affinity
-                for e_id in emp_map:
-                    emp_map[e_id]["project_ids"] = set()
-                    emp_map[e_id]["customer_keywords"] = set()
-                
-                for p_data in raw_periods:
-                    emp_sub_data = p_data.get("employment", {})
-                    # CORRECTION: Do NOT use _entity_id (which is the Period ID) as the Employee ID
-                    e_id = str(emp_sub_data.get("id", "")) or str(p_data.get("employmentId", ""))
-                    if e_id in emp_map:
-                        act = p_data.get("activities", {})
-                        p_proj = act.get("project", {})
-                        if p_proj:
-                            p_id = str(p_proj.get("id") or "")
-                            if p_id: emp_map[e_id]["project_ids"].add(p_id)
-                            # Extract keywords from customer address/name
-                            cust = p_proj.get("customer", {})
-                            for k in ["name", "address"]:
-                                val = cust.get(k, "")
-                                if val: emp_map[e_id]["customer_keywords"].add(str(val).upper()[:5])
+                if not valid_employees:
+                    continue
 
-                for e_id in emp_map:
-                    emp_map[e_id]["project_ids"] = list(emp_map[e_id]["project_ids"])
-                    emp_map[e_id]["customer_keywords"] = list(emp_map[e_id]["customer_keywords"])
-
-                # A. Train from LearningLog (manual feedback)
-                for log in logs:
-                    try:
-                        shift = log.get("shift_data", {})
-                        if not shift: continue
-                        
-                        punctuality = 0.95
-                        
-                        # Positive Sample
-                        sel_id = str(log.get("selected_id", ""))
-                        if sel_id in emp_map:
-                            emp = emp_map[sel_id]
-                            emp["punctuality_score"] = punctuality
-                            all_X.append(scorer.extract_features(emp, shift, global_all_roles, mappings=env_mappings))
-                            all_y.append(1.0)
-                        
-                        # Negative Sample
-                        rej_id = str(log.get("rejected_id", ""))
-                        if rej_id and rej_id in emp_map:
-                            emp = emp_map[rej_id]
-                            emp["punctuality_score"] = punctuality
-                            all_X.append(scorer.extract_features(emp, shift, global_all_roles, mappings=env_mappings))
-                            all_y.append(0.0)
-                            
-                            # Class Balancing: Duplicate manual negatives as they are very valuable
-                            all_X.append(scorer.extract_features(emp, shift, global_all_roles, mappings=env_mappings))
-                            all_y.append(0.0)
-                    except: continue
+                # B. Fetch Periods (History)
+                p_query = client.query(kind="Period")
+                # Optimization: Limit to recent history if needed, for now all
+                raw_periods = list(p_query.fetch())
                 
-                # B. Train from Period (historical assignments)
-                # Diagnostic counters
-                msgs_dropped_id = 0
-                msgs_total = len(raw_periods)
+                # C. Extract Features
+                # (Simplified logic mimicking the original but using clean dicts)
                 
-                for period_data in raw_periods:
-                    try:
-                        act_sub_data = period_data.get("activities", {})
-                        
-                        tmentry = period_data.get("tmentry")
-                        tmexit = period_data.get("tmexit")
-                        tmregister = period_data.get("tmregister")
-                        
-                        reg_dt = parse_date(tmregister)
-                        if not reg_dt: continue
-
-                        entry_dt = parse_date(tmentry)
-                        exit_dt = parse_date(tmexit)
-                        
-                        shift = {
-                            "date": format_date_iso(reg_dt),
-                            "start_time": entry_dt.strftime("%H:%M") if entry_dt else "08:00",
-                            "end_time": exit_dt.strftime("%H:%M") if exit_dt else "17:00",
-                            "role": str(act_sub_data.get("name", "worker")).strip().upper(),
-                            "project": act_sub_data.get("project"),
-                            "customer_address": (act_sub_data.get("project") or {}).get("customer", {}).get("address") if isinstance(act_sub_data, dict) else None
-                        }
-                        
-                        # CORRECTION: Do NOT use _entity_id (which is the Period ID) as the Employee ID
-                        emp_id = str(emp_sub_data.get("id", "")) or str(period_data.get("employmentId", ""))
-                        if emp_id and emp_id in emp_map:
-                            emp = emp_map[emp_id]
-                            emp["punctuality_score"] = 0.95
-                            
-                            features = scorer.extract_features(emp, shift, global_all_roles, mappings=env_mappings)
-                            all_X.append(features)
-                            all_y.append(1.0)
-                            
-                            # Time Decay / Recency Weighting
-                            days_ago = (datetime.now() - reg_dt).days
-                            if days_ago <= 60:
-                                all_X.append(features)
-                                all_y.append(1.0)
-                            total_samples += 1
-                        else:
-                             msgs_dropped_id += 1
-                    except: continue
-                
-                print(f"DEBUG: Company {primary_id}: Periods={msgs_total}, Dropped(ID Bad)={msgs_dropped_id}")
+                for p_entity in raw_periods:
+                    p = dict(p_entity)
                     
-            except: continue
+                    pid = p.get("employmentId")
+                    if not pid or pid not in valid_employees:
+                         continue
+                         
+                    emp_data = valid_employees[pid]
+                    
+                    # Parse Dates
+                    reg_dt = parse_date(p.get("tmregister"))
+                    if not reg_dt: continue
+                    
+                    # Construct Shift Object
+                    # We need to extract role/project from nested activities dict
+                    # Note: sync.py stored 'activities' as a dict or list? JSON likely.
+                    act_data = p.get("activities") or {}
+                    
+                    role = "worker"
+                    if isinstance(act_data, dict):
+                        role = str(act_data.get("name") or act_data.get("code") or "worker")
+                    
+                    shift = {
+                        "date": format_date_iso(reg_dt),
+                        "start_time": "08:00", # Fallback if tmregister is just date
+                        "end_time": "17:00",
+                        "role": role,
+                        "project": act_data.get("project") if isinstance(act_data, dict) else {},
+                        "customer_address": "" # Extract if deeper in JSON
+                    }
+                    
+                    # Positive Sample
+                    emp_data["punctuality_score"] = 0.95
+                    features = scorer.extract_features(emp_data, shift)
+                    all_X.append(features)
+                    all_y.append(1.0)
+                    
+                    # Negative Sample (Random)
+                    import random
+                    if len(valid_employees) > 1:
+                        neg_id = random.choice(list(valid_employees.keys()))
+                        if neg_id != pid:
+                            neg_emp = valid_employees[neg_id].copy()
+                            neg_emp["punctuality_score"] = 0.5
+                            all_X.append(scorer.extract_features(neg_emp, shift))
+                            all_y.append(0.0)
+
+            except Exception as e:
+                print(f"Error processing {primary_id}: {e}")
+                continue
 
         if not all_X:
-            update_status(message="No valid training samples found.", progress=1.0, phase="IDLE")
+            update_status(message="No training data extracted.", progress=1.0, phase="IDLE")
             set_running(False)
             return
 
-        # 3. Train Global Model
-        update_status("Stochastic Gradient Descent in progress...", 0.85, "TRAINING", log=f"Training Neural Scorer on {len(all_X)} samples...")
+        # 4. Train
+        update_status("Running Gradient Descent...", 0.9, "TRAINING", log=f"Training on {len(all_X)} samples...")
         
-        # Shuffle data before training to ensure proper validation split distribution
         indices = np.arange(len(all_X))
         np.random.shuffle(indices)
         X_shuffled = np.array(all_X)[indices]
         y_shuffled = np.array(all_y)[indices]
         
         metrics = scorer.train(X_shuffled, y_shuffled)
-        
-        final_loss = metrics.get("loss", 0.0)
-        val_loss = metrics.get("val_loss", 0.0)
-        val_accuracy = metrics.get("val_accuracy", 0.0)
-        
-        update_status("Persisting updated weights to GCS...", 0.95, log=f"Training completed. Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
         scorer.save_weights()
-
+        
         update_status(
-            message="Global AI Brain Updated", 
+            message="AI Training Completed", 
             progress=1.0, 
             phase="IDLE", 
-            log="Pipeline completed successfully. Brain is hot.", 
-            details={
-                "loss": float(final_loss),
-                "val_loss": float(val_loss),
-                "accuracy": float(val_accuracy),
-                "dataset_size": len(all_X),
-                "last_run": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
+            log=f"Model updated. Loss: {metrics.get('loss', 0):.4f}"
         )
         set_running(False)
         
@@ -425,10 +260,33 @@ def run_global_training():
         update_status(message=f"Error: {str(e)}", phase="IDLE")
         set_running(False)
 
+
+
+
+
 @router.post("/retrain")
 def retrain_model(req: RetrainRequest, background_tasks: BackgroundTasks, environment: str = Depends(verify_hmac)):
-    if get_status()["status"] == "running":
-        return {"status": "busy", "message": "Global training is already in progress."}
+    status = get_status()
+    if status["status"] == "running":
+        # Check staleness
+        import datetime
+        last_upd = status.get("last_updated")
+        is_stale = False
+        if last_upd:
+             if not isinstance(last_upd, datetime.datetime):
+                 from utils.date_utils import parse_date
+                 last_upd = parse_date(str(last_upd))
+             
+             if last_upd:
+                 diff = datetime.datetime.now(last_upd.tzinfo) - last_upd
+                 if diff.total_seconds() > 300:
+                     print(f"DEBUG: Stale training status detected in retrain ({diff.total_seconds()}s). Auto-unlocking.")
+                     is_stale = True
+
+        if not is_stale:
+            return {"status": "busy", "message": "Global training is already in progress."}
+        else:
+            set_running(False)
     
     set_running(True)
     update_status(message="Initializing Global Brain...", progress=0.0, phase="IDLE")
@@ -445,3 +303,48 @@ def reset_model(environment: str = Depends(verify_hmac)):
          return {"status": "success", "message": "Model weights erased. Brain is blank."}
     else:
          raise HTTPException(status_code=500, detail="Failed to reset model.")
+
+@router.get("/profile")
+def get_profile(environment: str = Depends(verify_hmac)):
+    """Debug: Returns the current learned Demand Profile JSON"""
+    from utils.demand_profiler import get_demand_profile
+    return get_demand_profile(environment) or {}
+
+@router.delete("/profile")
+def delete_profile(environment: str = Depends(verify_hmac)):
+    """Debug: Deletes the Demand Profile to force a fresh relearn"""
+    client = get_db().client
+    key = client.key("DemandProfile", environment)
+    client.delete(key)
+    return {"status": "success", "message": f"Demand Profile deleted by USER for {environment}"}
+
+@router.get("/ds-inspect")
+def inspect_datastore():
+    """Debug: Raw inspection of Datastore connectivity and data existence."""
+    messages = []
+    try:
+        from google.cloud import datastore
+        # 1. Default Namespace
+        client = datastore.Client()
+        query = client.query(kind='Period')
+        res = list(query.fetch(limit=1))
+        messages.append(f"Default NS Period count: {len(res)}")
+        if res: messages.append(f"Sample: {dict(res[0])}")
+
+        # 2. OVERCLEAN
+        client_clean = datastore.Client(namespace="OVERCLEAN")
+        query_clean = client_clean.query(kind='Period')
+        res_clean = list(query_clean.fetch(limit=1))
+        messages.append(f"OVERCLEAN Period count: {len(res_clean)}")
+        if res_clean: messages.append(f"Sample: {dict(res_clean[0])}")
+        
+        # 3. OVERFLOW
+        client_flow = datastore.Client(namespace="OVERFLOW")
+        query_flow = client_flow.query(kind='Period')
+        res_flow = list(query_flow.fetch(limit=1))
+        messages.append(f"OVERFLOW Period count: {len(res_flow)}")
+            
+    except Exception as e:
+        messages.append(f"CRITICAL ERROR: {str(e)}")
+    
+    return {"logs": messages}

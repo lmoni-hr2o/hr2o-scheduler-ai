@@ -2,7 +2,7 @@ import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 from fastapi import FastAPI, Request
-from routers import schedule, training, ingestion, agent, reports, learning
+from routers import schedule, training, ingestion, agent, reports, learning, labor_profiles, sync
 from fastapi.middleware.cors import CORSMiddleware
 
 # Initialize Firebase
@@ -17,15 +17,7 @@ except ValueError:
 
 app = FastAPI(title="TimePlanner AI Agent API")
 
-# Enable CORS for Flutter Web - Explicit headers for stability
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
-    allow_headers=["Content-Type", "X-HMAC-Signature", "Environment", "Authorization"],
-    expose_headers=["*"],
-)
+# CORSMiddleware will be added later to be the outermost
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -37,7 +29,22 @@ async def log_requests(request: Request, call_next):
     except Exception as e:
         print(f"CRITICAL: Middleware caught exception: {e}")
         from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=500, content={"detail": str(e)})
+        response = JSONResponse(status_code=500, content={"detail": str(e)})
+        # Manually add CORS headers to error response to prevent 'Failed to fetch' in browser
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+
+# Enable CORS - outermost layer
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
 app.include_router(schedule.router)
 app.include_router(training.router)
@@ -45,6 +52,8 @@ app.include_router(ingestion.router, prefix="/api/v1", tags=["Ingestion"])
 app.include_router(agent.router)
 app.include_router(reports.router)
 app.include_router(learning.router)
+app.include_router(labor_profiles.router)
+app.include_router(sync.router)
 
 @app.get("/")
 def read_root():

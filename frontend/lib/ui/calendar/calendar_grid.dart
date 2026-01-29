@@ -52,7 +52,9 @@ class _CalendarGridState extends State<CalendarGrid> {
     }
 
     final s = state;
-    final activeEmployees = s.employees.where((e) => e.hasHistory).toList();
+    // FIXED: Show all employees, not just those with history.
+    // The previous filter hidden employees causing "invisible shifts".
+    final activeEmployees = s.employees;
     
     final unavailabilities = s.unavailabilities;
     final List<dynamic> shifts = widget.scheduleData['schedule'] ?? [];

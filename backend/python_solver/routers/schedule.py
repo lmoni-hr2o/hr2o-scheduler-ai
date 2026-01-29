@@ -18,6 +18,8 @@ class Employee(BaseModel):
     customer_keywords: Optional[List[str]] = []
     address: Optional[str] = None
     bornDate: Optional[str] = None
+    labor_profile_id: Optional[str] = None
+    fullName: Optional[str] = None
 
 class ShiftRequirement(BaseModel):
     id: str
@@ -48,17 +50,47 @@ def generate_schedule(req: GenerateRequest, environment: str = Depends(verify_hm
     Stateless generation: receives all data, returns the solution.
     Now secured with HMAC and Environment header.
     """
+    # 0. Safety Check: Block if training is in progress (avoids race conditions/garbage output)
+    from utils.status_manager import get_status, set_running
+    status = get_status()
+    if status.get("status") == "running":
+        # Check staleness (if last update > 5 mins ago, auto-unlock)
+        import datetime
+        last_upd = status.get("last_updated")
+        is_stale = False
+        if last_upd:
+             # Ensure last_upd is datetime
+             if not isinstance(last_upd, datetime.datetime):
+                 from utils.date_utils import parse_date
+                 last_upd = parse_date(str(last_upd))
+             
+             if last_upd:
+                 diff = datetime.datetime.now(last_upd.tzinfo) - last_upd
+                 if diff.total_seconds() > 300: # 5 minutes
+                     print(f"WARNING: Stale running status detected ({diff.total_seconds()}s). Auto-unlocking.")
+                     is_stale = True
+
+        if not is_stale:
+            raise HTTPException(
+                status_code=503, 
+                detail="System is currently training the AI Brain. Please wait 30 seconds and try again."
+            )
+        else:
+            set_running(False) # Force unlock
+
     # 1. Prepare data for the solver
     employees_data = [
         {
             "id": emp.id, 
             "name": emp.name, 
+            "fullName": emp.name, # Fix for solver logging expecting fullName
             "role": emp.role, 
             "preferences": emp.preferences,
             "project_ids": emp.project_ids,
             "customer_keywords": emp.customer_keywords,
             "address": emp.address,
-            "bornDate": emp.bornDate
+            "bornDate": emp.bornDate,
+            "labor_profile_id": emp.labor_profile_id
         }
         for emp in req.employees
     ]
@@ -92,10 +124,28 @@ def generate_schedule(req: GenerateRequest, environment: str = Depends(verify_hm
 @router.get("/historical")
 def get_historical_schedule(start_date: str, end_date: str, environment: str = Depends(verify_hmac)):
     """Fetches historical shift data (Period) for the given range and environment."""
-    from utils.mapping_helper import mapper
+    # from utils.mapping_helper import mapper # Removed
     from utils.date_utils import parse_date, format_date_iso
     
-    raw_periods = mapper.get_periods(environment)
+    # Direct Datastore Query
+    client = get_db(namespace=environment).client
+    raw_periods = []
+    try:
+        query = client.query(kind="Period")
+        # Optimization: Filter by date if possible, but Period structure varies.
+        # Ideally: .add_filter("tmregister", ">=", start_date)
+        # For now, fetch all (or limit) and filter updates to keep logic identical to legacy
+        # But for 'History' we probably want a limit
+        # raw_periods = list(query.fetch(limit=2000))
+        # Better: Filter by range if we can trust the 'tmregister' field is indexed
+        # Let's try basic fetch and filter in memory to be safe as per legacy behavior
+        for entity in query.fetch(limit=5000):
+            p = dict(entity)
+            p["_entity_id"] = entity.key.name
+            raw_periods.append(p)
+    except Exception as e:
+        print(f"Error querying periods: {e}")
+
     
     # Parse range dates
     try:

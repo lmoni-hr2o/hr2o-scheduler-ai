@@ -124,13 +124,14 @@ class NeuralScorer:
             print(f"Error resetting weights: {e}")
             return False
 
-    def extract_features(self, emp, shift, all_roles, mappings=None):
+    def extract_features(self, emp, shift, all_roles=None, mappings=None):
         """
         Extracts 11 real features for an (employee, shift) pair.
         Uses dynamic mappings if provided, otherwise falls back to defaults.
         """
         from datetime import datetime
         import re
+        import zlib
         from utils.date_utils import parse_date
 
         # Helper to get value from entity based on mappings
@@ -161,7 +162,7 @@ class NeuralScorer:
             if feature_name == "role":
                 return entity.get("role") or (entity.get("employment") or {}).get("role")
             if feature_name == "age":
-                 return entity.get("bornDate") or (entity.get("person") or {}).get("bornDate")
+                return entity.get("bornDate") or (entity.get("person") or {}).get("bornDate")
             if feature_name == "address":
                 return entity.get("address") or (entity.get("person") or {}).get("address")
             
@@ -178,17 +179,10 @@ class NeuralScorer:
 
         def get_distance(emp_addr, cust_addr):
             # Placeholder for real geoloc distance
-            if not emp_addr or not cust_addr: return 0.9
+            # ERROR FIX: If address is missing, don't penalize heavily! (Was 0.9)
+            if not emp_addr or not cust_addr: return 0.1 
             if str(emp_addr).lower() == str(cust_addr).lower(): return 0.0
             return 0.3 # Moderate distance fallback
-
-        def get_punctuality(emp):
-            return emp.get("punctuality_score", 0.95)
-
-        def get_task_keywords(ops):
-            if not ops: return 0.5
-            # Simplified for now
-            return 0.5
 
         def normalize_role(r):
             if not r: return "WORKER"
@@ -196,18 +190,28 @@ class NeuralScorer:
             if "SVILUPPATORE" in r or "DEV" in r: return "DEVELOPER"
             if "PULIZI" in r or "CLEAN" in r: return "CLEANER"
             if "OPERA" in r: return "WORKER"
-            if "MANUTEN" in r: return "MAINTENANCE"
-            if "COORDINA" in r or "RESPONSABILE" in r: return "MANAGER"
+            if "MANUTEN" in r or "TECNICO" in r: return "MAINTENANCE"
+            if "COORDINA" in r or "RESPONSABILE" in r or "AMMINISTRA" in r or "MANAGER" in r: return "MANAGER"
+            if "MAGAZZIN" in r or "LOGISTIC" in r: return "LOGISTICS"
+            if "IMPIEGATO" in r or "SEGRETARIA" in r or "UFFICIO" in r: return "OFFICE"
+            if "AUTISTA" in r or "DRIVER" in r or "CONSEGNA" in r: return "DRIVER"
             return r
 
         # --- Feature Extraction using Mapped Values ---
 
         # 1. Role Match
         raw_emp_role = get_mapped_value(emp, "role_match", default=emp.get("role"))
-        # Shift role comes from the shift dict explicitly, usually not mapped on emp side
-        shift_role = normalize_role(shift.get("role"))
-        emp_role = normalize_role(raw_emp_role)
-        role_match = 1.0 if emp_role == shift_role else 0.0
+        shift_role_norm = normalize_role(shift.get("role"))
+        emp_role_norm = normalize_role(raw_emp_role)
+        
+        # FUZZY MATCH implementation (Aligned with Solver Engine)
+        # 1.0 = Exact or Containment. 0.0 = Mismatch.
+        if emp_role_norm == shift_role_norm:
+            role_match = 1.0
+        elif emp_role_norm in shift_role_norm or shift_role_norm in emp_role_norm:
+            role_match = 1.0
+        else:
+            role_match = 0.0
         
         # 2. Time of day
         start_hour = int(shift.get("start_time", "08:00").split(":")[0])
@@ -218,7 +222,6 @@ class NeuralScorer:
         day_feature = (date_obj.weekday() / 6.0) if date_obj else 0.5
         
         # 4. Age (Normalized)
-        # Try finding birth date via "age" mapping
         born_date_val = get_mapped_value(emp, "age")
         age_feature = get_age(born_date_val)
         
@@ -229,43 +232,38 @@ class NeuralScorer:
         
         # 6. Punctuality
         punctuality = get_mapped_value(emp, "punctuality", default=0.95)
-        if isinstance(punctuality, str): punctuality = 0.95 # Safety
+        if not isinstance(punctuality, (int, float)): punctuality = 0.95
         
-        # 7. Task Keywords/Complexity
-        keywords = 0.5 # Todo: Link to "task_keywords" mapping if applicable to employee skills
+        # 7. Task Keywords/Complexity (Placeholder)
+        keywords = 0.5
         
-        # 8. Seniority
+        # 8. Seniority (Placeholder based on ID length)
         seniority = min(len(str(emp.get("id", ""))) / 10.0, 1.0)
         
-        # 9. Role Index
-        s_role_norm = str(shift.get("role") or "").strip().upper()
-        role_idx = all_roles.index(s_role_norm) / max(len(all_roles)-1, 1) if s_role_norm in all_roles else 0.0
+        # 9. Stable Role Index (CRITICAL FIX)
+        # Instead of using a runtime-dependent list.index, we use a stable hash.
+        # This ensures "WORKER" always produces the same feature value.
+        clean_role = normalize_role(shift.get("role"))
+        role_hash = zlib.adler32(clean_role.encode()) % 1000
+        role_idx_feature = role_hash / 1000.0
 
         # 10. Vehicle required
         vehicle_req = 1.0 if shift.get("selectVehicleRequired") else 0.0
-        # If vehicle required, check if emp has vehicle (from mappings)
         if vehicle_req > 0:
             has_vehicle = get_mapped_value(emp, "vehicle_req")
-            if not has_vehicle: vehicle_feature = 0.0 # Penalty
-            else: vehicle_feature = 1.0
+            vehicle_feature = 1.0 if has_vehicle else 0.0
         else:
             vehicle_feature = 1.0
 
         # 11. Project/Commessa Affinity
         project_affinity = 0.0
         shift_proj = shift.get("project")
-        if isinstance(shift_proj, dict):
-            shift_proj_id = str(shift_proj.get("id") or "")
-        else:
-            shift_proj_id = str(shift_proj or "")
-            
-        # Check historical projects
+        shift_proj_id = str(shift_proj.get("id") if isinstance(shift_proj, dict) else (shift_proj or ""))
+        
         emp_projects = emp.get("project_ids", [])
         if shift_proj_id and str(shift_proj_id) in [str(x) for x in emp_projects]:
             project_affinity = 1.0
-        
-        if project_affinity == 0.0:
-            # Check mappings for project_affinity field in employee (maybe a preferred project field)
+        else:
             pref_proj = get_mapped_value(emp, "project_affinity")
             if pref_proj and str(pref_proj) == shift_proj_id:
                 project_affinity = 1.0
@@ -273,11 +271,15 @@ class NeuralScorer:
         features = [
             role_match, time_feature, day_feature, age_feature,
             dist_feature, float(punctuality), keywords, seniority,
-            role_idx, vehicle_feature, project_affinity
+            role_idx_feature, vehicle_feature, project_affinity
         ]
-        return np.array(features, dtype=np.float32)
+        feat_array = np.array(features, dtype=np.float32)
+        
+        # Final Sanitization: No NaNs or Infinite values
+        feat_array = np.nan_to_num(feat_array, nan=0.5, posinf=1.0, neginf=0.0)
+        return feat_array
 
-    def predict_affinity(self, emp, shift, all_roles, mappings=None):
+    def predict_affinity(self, emp, shift, all_roles=None, mappings=None):
         """
         Predicts how suitable an employee is for a shift using REAL features.
         """
@@ -289,10 +291,113 @@ class NeuralScorer:
             input_vector = np.expand_dims(features, axis=0) # Batch dimension
             
             score = self.model.predict(input_vector, verbose=0)
-            return float(score[0][0])
+            
+            # Prediction values between 0 and 1
+            neural_score = float(score[0][0])
+            
+            # --- HYBRID SCORING ENGINE ---
+            # Fallback to robust heuristics if Neural Model is uncertain or untrained (returns ~0.5 or 0.0)
+            
+            # 1. Base Score (Role is King)
+            heuristic_score = 0.5 # Start neutral
+            
+            if features[0] > 0.9: # Role Match
+                heuristic_score += 0.3 # Strong boost for role match (Base becomes 0.8)
+            else:
+                heuristic_score -= 0.4 # Heavy penalty for role mismatch
+                
+            # 2. Distance Penalty (features[4])
+            # Distance is 0.0 (close) to 1.0 (far). We want to penalize 'far'.
+            dist_penalty = features[4] * 0.2
+            heuristic_score -= dist_penalty
+            
+            # 3. Project Affinity Bonus (features[10])
+            if features[10] > 0.9:
+                heuristic_score += 0.1
+                
+            # Clamp Heuristic
+            heuristic_score = max(0.01, min(0.99, heuristic_score))
+            
+            # 4. Fusion Strategy: "Safety Net"
+            # If Heuristic is high (valid role), we NEVER allow the Neural Net to drag it below 0.6
+            # This solves the "0% Confidence" bug permanently.
+            if heuristic_score > 0.7:
+                final_score = max(heuristic_score, neural_score)
+            else:
+                # If heuristic is bad (wrong role), we trust the heuristic unless NN is SUPER confident
+                if neural_score > 0.9: 
+                     final_score = neural_score # Maybe the AI knows a secret exception
+                else: 
+                     final_score = heuristic_score
+            
+            # DEBUG: Log decisions
+            if not hasattr(self, "_debug_count"): self._debug_count = 0
+            if self._debug_count < 5 or final_score < 0.1:
+                print(f"DEBUG HYBRID: RoleMatch={features[0]} -> Heuristic={heuristic_score:.2f}, Neural={neural_score:.4f} => Final={final_score:.4f}")
+                self._debug_count += 1
+            
+            return final_score
         except Exception as e:
             print(f"Prediction error: {e}")
             return 0.5 # Safe fallback
+
+    def predict_batch(self, X):
+        """
+        Batch version of Hybrid Scoring. 
+        Applies heuristics + Neural Net using vectorized Numpy operations.
+        X shape: (N, 11)
+        Returns: (N, 1) scores
+        """
+        if not self.enabled or self.model is None:
+            return np.ones((len(X), 1)) * 0.5
+
+        try:
+            # 1. Get Neural Scores
+            neural_scores = self.model.predict(X, batch_size=2048, verbose=0) # (N, 1)
+            
+            # 2. Vectorized Heuristics
+            # Features: 0=RoleMatch, 4=Distance, 10=ProjectAffinity
+            
+            heuristics = np.full(neural_scores.shape, 0.5)
+            
+            # Role Match Bonus/Penalty
+            # mask_match = X[:, 0] > 0.9
+            heuristics += np.where(X[:, [0]] > 0.9, 0.3, -0.4)
+            
+            # Distance Penalty
+            heuristics -= (X[:, [4]] * 0.2)
+            
+            # Project Bonus
+            heuristics += np.where(X[:, [10]] > 0.9, 0.1, 0.0)
+            
+            # Clamp
+            heuristics = np.clip(heuristics, 0.01, 0.99)
+            
+            # 3. Hybrid Fusion Logic
+            # Condition A: Good Heuristic (> 0.7) -> Safety Net (Max)
+            # Condition B: Bad Heuristic (< 0.7) but Great Neural (> 0.9) -> Trust Neural
+            # Condition C: Else -> Trust Heuristic
+            
+            final_scores = np.where(
+                heuristics > 0.7, 
+                np.maximum(heuristics, neural_scores), # Safety Net
+                np.where(neural_scores > 0.9, neural_scores, heuristics) # Exception or Fallback
+            )
+            
+            # Final Sanitization: Ensure NO NaNs escape
+            final_scores = np.nan_to_num(final_scores, nan=0.5, posinf=1.0, neginf=0.0)
+
+            # DEBUG LOGGING (First 3 samples)
+            if not hasattr(self, "_batch_log_count"): self._batch_log_count = 0
+            if self._batch_log_count < 3:
+                print(f"DEBUG HYBRID BATCH [0]: H={heuristics[0][0]:.2f}, N={neural_scores[0][0]:.4f} -> F={final_scores[0][0]:.4f}")
+                self._batch_log_count += 1
+                
+            return final_scores
+            
+        except Exception as e:
+            print(f"Batch inference error: {e}")
+            return np.ones((len(X), 1)) * 0.5
 
     def train(self, X, y, epochs=20, validation_split=0.2):
         """

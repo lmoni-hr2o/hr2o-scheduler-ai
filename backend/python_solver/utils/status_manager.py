@@ -17,7 +17,8 @@ def _get_raw_status():
         "message": "Engine Ready",
         "phase": "IDLE",
         "logs": "[]",
-        "details": "{}"
+        "details": "{}",
+        "last_updated": datetime.now()
     }
 
 def update_status(message: str = None, progress: float = None, phase: str = None, log: str = None, details: dict = None):
@@ -43,6 +44,8 @@ def update_status(message: str = None, progress: float = None, phase: str = None
         current_details.update(details)
         status["details"] = json.dumps(current_details)
     
+    status["last_updated"] = datetime.now()
+    
     from google.cloud import datastore
     entity = datastore.Entity(key=key, exclude_from_indexes=['logs', 'details'])
     entity.update(status)
@@ -57,7 +60,8 @@ def get_status():
         "message": raw.get("message", "N/A"),
         "phase": raw.get("phase", "IDLE"),
         "logs": json.loads(raw.get("logs", "[]")),
-        "details": json.loads(raw.get("details", "{}"))
+        "details": json.loads(raw.get("details", "{}")),
+        "last_updated": raw.get("last_updated")
     }
 
 def set_running(is_running: bool):
@@ -72,6 +76,8 @@ def set_running(is_running: bool):
     else:
         status["phase"] = "IDLE"
         status["progress"] = 1.0
+        
+    status["last_updated"] = datetime.now()
         
     from google.cloud import datastore
     entity = datastore.Entity(key=key, exclude_from_indexes=['logs', 'details'])
