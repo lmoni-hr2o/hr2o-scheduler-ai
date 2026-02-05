@@ -61,7 +61,13 @@ class Activity(BaseModel):
     project_id: Optional[str] = None
     note: Optional[str] = None
     typeActivity: Optional[str] = None
-    operations: Optional[List[Dict[str, Any]]] = None # Keep for detailed task analysis
+    operations: Optional[List[Dict[str, Any]]] = None 
+    
+    # Contractual Demand Signals
+    dailySchedule: Optional[List[Dict[str, Any]]] = None # List of daily minute/hour requirements
+    weeklySchedule: Optional[List[int]] = None # Days of week (0-6)
+    hhSchedule: Optional[float] = None # Total weekly minutes scheduled
+    typeSchedule: Optional[str] = None
     
     @field_validator('id', mode='before')
     @classmethod

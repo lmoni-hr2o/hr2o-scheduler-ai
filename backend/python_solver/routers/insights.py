@@ -252,6 +252,10 @@ async def analyze_pre_check(request: PreCheckRequest):
     Analizza i parametri PRIMA della generazione usando il MOTORE AI INTERNO.
     """
     try:
+        # DEBUG: Sample Activities to check for timing info
+        if request.activities:
+            print(f"DEBUG PreCheck: First activity sample: {request.activities[0]}")
+            
         # 1. Fetch Demand Profile
         profile = get_demand_profile(request.environment)
         

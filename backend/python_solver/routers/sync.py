@@ -57,6 +57,13 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
     }
     raw_periods = fetch_external("period", namespace, p_params)
     
+    # --- DEBUG LOGGING ---
+    if raw_periods and len(raw_periods) > 0:
+        print(f"DEBUG: Sample Raw Period (Keys): {list(raw_periods[0].keys())}")
+        print(f"DEBUG: Sample Raw Period (Activity): {raw_periods[0].get('activities')}")
+    else:
+        print(f"DEBUG: No raw periods received for {namespace}.")
+    
     # --- PROCESSING ---
     
     # --- PROCESSING ---
@@ -290,7 +297,11 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
                 customer_address=str(cust.get("address") or cust.get("city") or ""),
                 project_id=str(proj.get("id") or ""),
                 typeActivity=str(act.get("typeActivity") or ""),
-                operations=act.get("operations") or []
+                operations=act.get("operations") or [],
+                dailySchedule=act.get("dailySchedule"),
+                weeklySchedule=act.get("weeklySchedule"),
+                hhSchedule=act.get("hhSchedule"),
+                typeSchedule=act.get("typeSchedule")
             )
 
     # D. Periods (History Learning)

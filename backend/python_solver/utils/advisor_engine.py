@@ -46,15 +46,55 @@ class AdvisorEngine:
             except Exception as e:
                 print(f"AdvisorEngine demand error: {e}")
 
+        # 2b. Contractual Demand Calculation (from Activities list in request)
+        total_contractual_hours = 0
+        if start_date and end_date and activities:
+            try:
+                s_dt = datetime.fromisoformat(start_date)
+                e_dt = datetime.fromisoformat(end_date)
+                num_days = (e_dt - s_dt).days + 1
+                
+                for act in activities:
+                    hh_sched = act.get("hhSchedule") # Total weekly minutes
+                    daily_low = act.get("dailySchedule") # List of minute/hour settings
+                    weekly_dow = act.get("weeklySchedule") # List of active DOWs [0, 1...]
+                    
+                    if daily_low and isinstance(daily_low, list):
+                        # Use daily patterns across the period
+                        for d in range(num_days):
+                            curr_dt = s_dt + timedelta(days=d)
+                            dow_idx = curr_dt.weekday()
+                            if dow_idx < len(daily_low):
+                                entry = daily_low[dow_idx]
+                                if isinstance(entry, dict):
+                                    mins = entry.get("durationTime") or 0
+                                    # If durationTime is missing, maybe it's hhSchedule / days
+                                    total_contractual_hours += (float(mins) / 60.0)
+                                elif isinstance(entry, (int, float)):
+                                    total_contractual_hours += (float(entry) / 60.0)
+                    elif hh_sched:
+                        # Fallback to spreading hhSchedule over the period
+                        # 960 min / week = 16h / week
+                        total_contractual_hours += (float(hh_sched) / 60.0) * (num_days / 7.0)
+            except Exception as e_c:
+                print(f"AdvisorEngine contractual demand error: {e_c}")
+
+        # Final Demand = Max(Historical Profile, Contractual definition)
+        original_learned_demand = total_demand_hours
+        total_demand_hours = max(total_demand_hours, total_contractual_hours)
+        
         # 3. Feasibility Analysis
         gap = total_contract_hours - total_demand_hours
         utilization = (total_demand_hours / total_contract_hours * 100) if total_contract_hours > 0 else 0
         
         summary = f"Analisi Tecnica: Disponibilità {total_contract_hours:.1f}h vs Carico Stimato {total_demand_hours:.1f}h. "
+        if total_demand_hours > 0 and original_learned_demand == 0:
+            summary += "(Basato su fabbisogni contrattuali commesse) "
+
         if utilization > 95:
             summary += "Attenzione: saturazione altissima (>95%). Rischio elevato di turni scoperti."
         elif utilization < 60:
-            summary += "Bassa saturazione (<60%). Possibile eccesso di personale per questa settimana."
+            summary += f"Bassa saturazione ({utilization:.1f}%). Possibile eccesso di personale per questa settimana."
         else:
             summary += f"Saturazione ottimale ({utilization:.1f}%). Lo scheduling dovrebbe essere fluido."
 
@@ -90,12 +130,17 @@ class AdvisorEngine:
                 "payload": {"penalty_unassigned": 500.0}
             })
 
-        # D. Technical Check (DOW check)
-        # If demand is 0, we should warn
+        # Data Quality Warnings
         if total_demand_hours == 0:
             suggestions.append({
                 "title": "Verifica Dati Sorgente",
                 "description": "Non ho rilevato storico per questo periodo. Assicurati che le commesse siano state sincronizzate correttamente o carica uno storico precedente.",
+                "type": "info"
+            })
+        elif original_learned_demand == 0:
+            suggestions.append({
+                "title": "Stima Contrattuale",
+                "description": "L'analisi si basa sui dati teorici delle commesse perché non ho trovato storico registrato.",
                 "type": "info"
             })
 
