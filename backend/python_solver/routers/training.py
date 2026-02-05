@@ -49,8 +49,70 @@ class FeedbackRequest(BaseModel):
     rejected_id: Optional[str] = None
     shift_data: Optional[dict] = {}
 
+class ScheduleFeedbackRequest(BaseModel):
+    environment: str
+    schedule: List[Dict[str, Any]]
+
 class RetrainRequest(BaseModel):
     company_id: Optional[str] = None
+
+@router.post("/feedback")
+def submit_feedback(req: ScheduleFeedbackRequest, background_tasks: BackgroundTasks):
+    """
+    Submits a finalized schedule as training feedback.
+    The AI will learn from the assignments in this schedule.
+    """
+    background_tasks.add_task(run_incremental_training, req.environment, req.schedule)
+    return {"status": "success", "message": "Feedback received. Incremental training started."}
+
+def run_incremental_training(environment: str, schedule: List[Dict[str, Any]]):
+    """
+    Background Task: Incremental Training.
+    Updates the model based on a single schedule's assignments.
+    """
+    print(f"DEBUG: Starting Incremental Training for {environment}...")
+    try:
+        scorer = NeuralScorer()
+        scorer.refresh_if_needed()
+        
+        all_X = []
+        all_y = []
+        
+        # 1. Extract assignments as positive samples
+        for s in schedule:
+            if s.get("employee_id") and not s.get("is_unassigned"):
+                # We need the full employee object to extract features.
+                # However, the feedback might only contain basic info.
+                # We'll fetch the employee from Datastore to be safe.
+                eid = s["employee_id"]
+                client = get_db(namespace=environment).client
+                emp_entity = client.get(client.key("Employment", eid))
+                
+                if emp_entity:
+                    emp_data = dict(emp_entity)
+                    emp_data["id"] = eid
+                    
+                    features = scorer.extract_features(emp_data, s)
+                    all_X.append(features)
+                    all_y.append(1.0)
+                    
+                    # Also add a negative sample: same shift, random different person
+                    # (Simplified negative sampling)
+                    # For a truly effective learning, we need real 'alternatives'.
+        
+        if all_X:
+            print(f"DEBUG: Training on {len(all_X)} positive samples from feedback...")
+            X = np.array(all_X)
+            y = np.array(all_y)
+            # Fast incremental step: 2 epochs
+            scorer.train(X, y, epochs=2, validation_split=0.0)
+            scorer.save_weights()
+            print(f"DEBUG: AI Brain updated successfully for {environment}.")
+        else:
+            print(f"DEBUG: No valid assigned employees found in feedback for {environment}.")
+            
+    except Exception as e:
+        print(f"ERROR in Incremental Training: {e}")
 
 @router.get("/progress")
 def get_progress(environment: str = Depends(verify_hmac)):
@@ -69,32 +131,62 @@ def debug_mapper():
     return {"status": "deprecated"}
 
 def discover_unique_environments():
-    """Returns all discovered companies from Datastore."""
+    """Returns all discovered companies from Datastore by scanning all namespaces."""
+    client = get_db().client
     results = []
-    # Simple scan of known namespaces
-    for ns in ["OVERCLEAN", "OVERFLOW", "default"]:
+    
+    # 1. Find all active namespaces
+    namespaces = []
+    try:
+        ns_query = client.query(kind="__namespace__")
+        ns_query.keys_only()
+        namespaces = [str(ns.key.id_or_name) for ns in ns_query.fetch()]
+    except Exception as e:
+        print(f"Error fetching namespaces: {e}")
+        namespaces = ["OVERCLEAN", "OVERFLOW", None]
+
+    # 2. Search for Companies in each namespace
+    seen_ids = set()
+    for ns in namespaces:
+        # Skip architectural namespaces
+        if ns and ns.startswith("__"): continue
+        
         try:
-            client = get_db(namespace=ns).client
-            # Fetch Companies
-            query = client.query(kind="Company")
+            # Fetch Companies in this namespace
+            query = client.query(kind="Company", namespace=ns)
             for entity in query.fetch():
                 data = dict(entity)
-                # Handle numeric (id) or string (name) keys safely
                 safe_id = str(entity.key.id_or_name)
-                results.append({
-                    "id": safe_id,
-                    "name": data.get("name", safe_id),
-                    "namespace": ns,
-                    "is_active": True
-                })
-        except: pass
+                
+                # Use a unique key for the result (id + namespace if needed, but id is usually unique enough)
+                if safe_id in seen_ids: continue
+                
+                # Filter out empty companies
+                # FIX: Default to 0 now - if we haven't synced it yet to know the count, don't show it.
+                emp_count = data.get("active_employees_count", 0)
+                
+                # Only add if it has employees
+                if emp_count > 0:
+                    results.append({
+                        "id": safe_id,
+                        "name": data.get("name", safe_id),
+                        "namespace": ns,
+                        "active_employees_count": emp_count,
+                        "is_active": True
+                    })
+                    seen_ids.add(safe_id)
+        except Exception as e:
+            print(f"Error scanning namespace {ns}: {e}")
+            
     return results
 
 @router.get("/environments")
 def get_environments():
     """Returns a list of all discovered companies (ID and Name) with metadata."""
     envs = discover_unique_environments()
-    return {"environments": envs, "count": len(envs)}
+    # Filter only those with employees (already filtered in discover but double check for safety)
+    valid_envs = [e for e in envs if e.get("active_employees_count", 0) > 0]
+    return {"environments": valid_envs, "count": len(valid_envs)}
 
 @router.on_event("startup")
 def startup_event():
@@ -338,13 +430,66 @@ def inspect_datastore():
         messages.append(f"OVERCLEAN Period count: {len(res_clean)}")
         if res_clean: messages.append(f"Sample: {dict(res_clean[0])}")
         
-        # 3. OVERFLOW
-        client_flow = datastore.Client(namespace="OVERFLOW")
-        query_flow = client_flow.query(kind='Period')
-        res_flow = list(query_flow.fetch(limit=1))
-        messages.append(f"OVERFLOW Period count: {len(res_flow)}")
+        # 4. OVERCLEAN DEMAND PROFILE
+        eid = "5629499534213120"
+        client_global = datastore.Client()
+        key_p = client_global.key("DemandProfile", eid)
+        ent_p = client_global.get(key_p)
+        if ent_p:
+            messages.append(f"OverClean Profile found (last_updated: {ent_p.get('last_updated')})")
+            import json
+            p_data = json.loads(ent_p.get("data_json", "{}"))
+            messages.append(f"OverClean Profile activity count: {len(p_data)}")
+        else:
+            messages.append("OverClean Profile NOT FOUND in Datastore")
+
+        # 6. SCAN ALL NAMESPACES FOR PERIODS
+        q_ns = client.query(kind="__namespace__")
+        q_ns.keys_only()
+        all_nss = [str(e.key.id_or_name) for e in q_ns.fetch()]
+        
+        counts = []
+        for ns_id in all_nss:
+            if ns_id.startswith("__"): continue
+            q_p = client.query(kind="Period", namespace=ns_id)
+            count = len(list(q_p.fetch(limit=100)))
+            if count > 0:
+                counts.append(f"NS {ns_id}: {count} periods")
+        
+        if counts:
+            messages.append("Global Period Scan: " + " | ".join(counts))
+        else:
+            messages.append("Global Period Scan: NO PERIODS FOUND ANYWHERE")
             
     except Exception as e:
         messages.append(f"CRITICAL ERROR: {str(e)}")
     
     return {"logs": messages}
+@router.post("/learn-demand")
+def learn_demand(environment: str = Depends(verify_hmac)):
+    """
+    Triggers the DemandProfiler to learn from ALL available history in the environment's namespace.
+    """
+    try:
+        from utils.demand_profiler import DemandProfiler
+        from google.cloud import datastore
+        
+        client = get_db(namespace=environment).client
+        query = client.query(kind="Period")
+        raw_periods = list(query.fetch())
+        
+        if not raw_periods:
+            return {"status": "warning", "message": f"No periods found in namespace {environment}. Learning skipped."}
+            
+        profiler = DemandProfiler(environment)
+        profiler.learn_from_periods(raw_periods)
+        profiler.save_to_datastore()
+        
+        return {
+            "status": "success", 
+            "message": f"Demand Profile learned from {len(raw_periods)} periods for {environment}.",
+            "activity_count": len(profiler.profile)
+        }
+    except Exception as e:
+        print(f"Error in learn_demand: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

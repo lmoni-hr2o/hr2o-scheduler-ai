@@ -6,6 +6,10 @@ from typing import List, Optional
 from solver.engine import solve_schedule
 from scorer.model import NeuralScorer
 from utils.security import verify_hmac
+import uuid
+import datetime
+import json
+from utils.cloud_tasks import enqueue_task
 
 router = APIRouter(prefix="/schedule", tags=["Schedule"])
 
@@ -38,88 +42,103 @@ class Unavailability(BaseModel):
 class GenerateRequest(BaseModel):
     start_date: str
     end_date: str
-    employees: List[Employee]
-    required_shifts: Optional[List[ShiftRequirement]] = []
-    unavailabilities: Optional[List[Unavailability]] = []
+    employees: List[dict] # Bypassing Pydantic model for memory efficiency
+    required_shifts: Optional[List[dict]] = []
+    unavailabilities: Optional[List[dict]] = []
     activities: Optional[List[dict]] = []
     constraints: Optional[dict] = {}
 
 @router.post("/generate")
 def generate_schedule(req: GenerateRequest, environment: str = Depends(verify_hmac)):
     """
-    Stateless generation: receives all data, returns the solution.
-    Now secured with HMAC and Environment header.
+    Async generation: Saves request, enqueues Cloud Task, returns job_id.
     """
-    # 0. Safety Check: Block if training is in progress (avoids race conditions/garbage output)
-    from utils.status_manager import get_status, set_running
-    status = get_status()
-    if status.get("status") == "running":
-        # Check staleness (if last update > 5 mins ago, auto-unlock)
-        import datetime
-        last_upd = status.get("last_updated")
-        is_stale = False
-        if last_upd:
-             # Ensure last_upd is datetime
-             if not isinstance(last_upd, datetime.datetime):
-                 from utils.date_utils import parse_date
-                 last_upd = parse_date(str(last_upd))
-             
-             if last_upd:
-                 diff = datetime.datetime.now(last_upd.tzinfo) - last_upd
-                 if diff.total_seconds() > 300: # 5 minutes
-                     print(f"WARNING: Stale running status detected ({diff.total_seconds()}s). Auto-unlocking.")
-                     is_stale = True
+    try:
+        job_id = str(uuid.uuid4())
+        print(f"DEBUG: Enqueuing Async Job {job_id} for env {environment}")
 
-        if not is_stale:
-            raise HTTPException(
-                status_code=503, 
-                detail="System is currently training the AI Brain. Please wait 30 seconds and try again."
-            )
-        else:
-            set_running(False) # Force unlock
-
-    # 1. Prepare data for the solver
-    employees_data = [
-        {
-            "id": emp.id, 
-            "name": emp.name, 
-            "fullName": emp.name, # Fix for solver logging expecting fullName
-            "role": emp.role, 
-            "preferences": emp.preferences,
-            "project_ids": emp.project_ids,
-            "customer_keywords": emp.customer_keywords,
-            "address": emp.address,
-            "bornDate": emp.bornDate,
-            "labor_profile_id": emp.labor_profile_id
+        # 1. Save Request to Datastore
+        client = get_db().client
+        key = client.key("AsyncJob", job_id)
+        job = {
+            "job_id": job_id,
+            "status": "queued",
+            "created_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow(),
+            "environment": environment,
+            # We store the raw request as a dict
+            "request_payload": json.dumps(req.dict()) 
         }
-        for emp in req.employees
-    ]
-    
-    required_shifts_data = [s.dict() for s in req.required_shifts]
-    unavailabilities_data = [u.dict() for u in req.unavailabilities]
+        entity = client.entity(key=key, exclude_from_indexes=["request_payload"])
+        entity.update(job)
+        client.put(entity)
 
-    # 2. Optimization
-    # Pass 'environment' to the solver for configuration lookup
-    result = solve_schedule(
-        employees_data, 
-        required_shifts_data,
-        unavailabilities_data,
-        req.constraints, 
-        req.start_date, 
-        req.end_date,
-        activities=req.activities,
-        environment=environment
-    )
+        # 2. Enqueue Task
+        # Payload for worker just needs ID
+        task_name = enqueue_task("/worker/solve", {"job_id": job_id})
+        
+        # 3. Return Job ID
+        return {
+            "status": "queued",
+            "job_id": job_id,
+            "task_name": task_name,
+            "message": "Schedule generation started in background."
+        }
 
-    if result is None:
-        raise HTTPException(status_code=400, detail="Infeasible schedule: could not find a valid solution with these constraints.")
+    except Exception as e:
+        import traceback
+        print(f"CRITICAL: Error enqueuing job: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # 3. Return the solution directly
-    return {
-        "status": "success",
-        "solver_status": "optimal",
-        "schedule": result
-    }
+@router.get("/job/{job_id}")
+def get_job_status(job_id: str):
+    """
+    Polls the status of an async job.
+    """
+    try:
+        client = get_db().client
+        key = client.key("AsyncJob", job_id)
+        job = client.get(key)
+
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        status = job.get("status", "unknown")
+        
+        response = {
+            "job_id": job_id,
+            "status": status,
+            "updated_at": str(job.get("updated_at"))
+        }
+
+        if status == "completed":
+             # Parse result
+             import json
+             try:
+                 # Check if result is stored as string or blob
+                 res = job.get("result", "{}")
+                 if isinstance(res, bytes):
+                     res = res.decode('utf-8')
+                 response["schedule"] = json.loads(res)
+                 response["solver_status"] = "optimal" # Fallback/Assume
+             except Exception as e:
+                 print(f"Error parsing result: {e}")
+                 response["schedule"] = []
+                 response["error"] = "Failed to parse result"
+        
+        elif status == "failed":
+            response["error"] = job.get("error", "Unknown error")
+            response["traceback"] = job.get("traceback")
+
+        return response
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error fetching job {job_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/historical")
 def get_historical_schedule(start_date: str, end_date: str, environment: str = Depends(verify_hmac)):
@@ -200,7 +219,16 @@ def get_historical_schedule(start_date: str, end_date: str, environment: str = D
                 emp_name = get_nested(p, ["employment.person.fullName", "employee_name", "employment.fullName"], "Unknown Worker")
                 
                 # Activity Name
-                act_name = get_nested(p, ["activities.name", "activity_name", "activities.project.description"], "Fixed Activity")
+                # Handle list of activities (common case) or dict
+                acts = p.get("activities")
+                if isinstance(acts, list) and len(acts) > 0:
+                    first_act = acts[0]
+                    # Try name, or project description, or code
+                    act_name = first_act.get("name") or first_act.get("project", {}).get("description") or first_act.get("code") or "Unknown Task"
+                elif isinstance(acts, dict):
+                     act_name = acts.get("name") or acts.get("project", {}).get("description") or "Unknown Task"
+                else:
+                    act_name = get_nested(p, ["activity_name", "activities.name"], "N/A")
 
                 historical_shifts.append({
                     "id": str(p.get("_entity_id", "") or p.get("id", "") or "P" + str(len(historical_shifts))),

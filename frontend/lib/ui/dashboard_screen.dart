@@ -1,20 +1,19 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../blocs/schedule_bloc.dart';
 import '../repositories/schedule_repository.dart';
 import 'calendar/calendar_grid.dart';
 import 'widgets/ai_monitor_widget.dart';
+import 'widgets/ai_report_dialog.dart';
+import 'widgets/ai_advisor_dialog.dart';
 import 'settings/demand_settings_dialog.dart';
 import 'theme/app_theme.dart';
 import '../utils/security_utils.dart';
 
-import 'settings/developer_hub_screen.dart';
 import 'settings/ai_engine_monitor_screen.dart';
-import 'jobs_management_screen.dart';
 import 'company_selection_screen.dart';
-import 'schedule_comparison_screen.dart';
-import 'settings/labor_profiles_screen.dart';
-import 'employees_management_screen.dart';
+import 'labor_profiles_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -24,6 +23,19 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  // Navigation State
+  DateTime _visibleWeekStart = _getStartOfWeek(DateTime.now());
+
+  static DateTime _getStartOfWeek(DateTime date) {
+    return date.subtract(Duration(days: date.weekday - 1));
+  }
+
+  void _navigateWeek(int weeks) {
+    setState(() {
+      _visibleWeekStart = _visibleWeekStart.add(Duration(days: 7 * weeks));
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -33,6 +45,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Determine the end date of the visible week for display
+    final visibleWeekEnd = _visibleWeekStart.add(const Duration(days: 6));
+    final dateFormat = DateFormat('dd MMM yyyy');
+
     return Scaffold(
       extendBodyBehindAppBar: true,
       appBar: AppBar(
@@ -65,6 +81,34 @@ class _DashboardScreenState extends State<DashboardScreen> {
           BlocBuilder<ScheduleBloc, ScheduleState>(
             builder: (context, state) {
               if (state is ScheduleLoaded && state.schedules.isNotEmpty) {
+                 return Padding(
+                   padding: const EdgeInsets.only(right: 8.0),
+                   child: ElevatedButton.icon(
+                     style: ElevatedButton.styleFrom(
+                       backgroundColor: AppTheme.aiGlow.withOpacity(0.2),
+                       side: const BorderSide(color: AppTheme.aiGlow),
+                     ),
+                     icon: const Icon(Icons.psychology, color: Colors.white, size: 18),
+                     label: const Text("AI REPORT", style: TextStyle(color: Colors.white)),
+                     onPressed: () {
+                       showDialog(
+                         context: context,
+                         builder: (_) => AiReportDialog(
+                           schedule: state.schedules.first['schedule'],
+                           startDate: _visibleWeekStart,
+                           endDate: visibleWeekEnd,
+                         ),
+                       );
+                     },
+                   ),
+                 );
+              }
+              return const SizedBox();
+            },
+          ),
+          BlocBuilder<ScheduleBloc, ScheduleState>(
+             builder: (context, state) {
+              if (state is ScheduleLoaded && state.schedules.isNotEmpty) {
                 return PopupMenuButton<String>(
                   icon: const Icon(Icons.download_rounded, color: AppTheme.textPrimary),
                   tooltip: "Export Schedule",
@@ -86,6 +130,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
             },
           ),
           IconButton(
+            icon: const Icon(Icons.assignment_ind_rounded, color: AppTheme.textPrimary),
+            tooltip: "Profili Lavorativi",
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => LaborProfilesScreen()),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.psychology_rounded, color: AppTheme.aiGlow),
             tooltip: "Neural Engine Monitor",
             onPressed: () {
@@ -99,31 +153,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.tune_rounded, color: AppTheme.textPrimary),
-            tooltip: "Demand Settings",
+            tooltip: "AI Settings",
             onPressed: () {
               showDialog(
                 context: context,
                 builder: (context) => const DemandSettingsDialog(),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.people_outline_rounded, color: AppTheme.aiGlow),
-            tooltip: "Gestione Dipendenti",
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const EmployeesManagementScreen()),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.work_outline, color: AppTheme.aiGlow),
-            tooltip: "Gestione Commesse",
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const JobsManagementScreen()),
               );
             },
           ),
@@ -137,12 +171,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
       body: Stack(
         children: [
           // Mesh Gradient Background
+          // Deep Cyber Background
           Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [AppTheme.background, const Color(0xFF1E1B4B)],
+            decoration: const BoxDecoration(
+              gradient: RadialGradient(
+                center: Alignment(0.0, -0.4),
+                radius: 1.5,
+                colors: [
+                  Color(0xFF1E1B4B), // Deep Indigo Glow
+                  AppTheme.background, // Abyss
+                ],
               ),
             ),
           ),
@@ -198,84 +236,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       const AiMonitorWidget(),
                       const Spacer(),
                       
-                      const SizedBox(height: 12),
-                      
-                      const SizedBox(height: 12),
-                      
-                      // Labor Profiles Access
-                      InkWell(
-                        onTap: () => Navigator.push(
-                          context, 
-                          MaterialPageRoute(builder: (_) => const LaborProfilesScreen())
-                        ),
-                        child: Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.white10),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.gavel_rounded, size: 18, color: Colors.orangeAccent),
-                              const SizedBox(width: 8),
-                              Text("Profili Normativi", style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-
-                      // Comparison Access
-                      InkWell(
-                        onTap: () => Navigator.push(
-                          context, 
-                          MaterialPageRoute(builder: (_) => ScheduleComparisonScreen(repository: context.read<ScheduleRepository>()))
-                        ),
-                        child: Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.white10),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.compare_arrows_rounded, size: 18, color: AppTheme.aiGlow),
-                              const SizedBox(width: 8),
-                              Text("Analisi & Confronto", style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-
-                      // Developer Access
-                      InkWell(
-                        onTap: () => Navigator.push(
-                          context, 
-                          MaterialPageRoute(builder: (_) => DeveloperHubScreen(repository: context.read<ScheduleRepository>()))
-                        ),
-                        child: Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.white10),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.terminal_rounded, size: 18, color: Colors.blueAccent),
-                              const SizedBox(width: 8),
-                              Text("Developer Hub", style: TextStyle(color: Colors.grey.shade400, fontSize: 12)),
-                            ],
-                          ),
-                        ),
-                      ),
                       const SizedBox(height: 24),
                       
                       Text("LEGEND", style: Theme.of(context).textTheme.titleSmall?.copyWith(color: AppTheme.textSecondary, letterSpacing: 1.5)),
                       const SizedBox(height: 16),
                       _buildLegendItem("Work Shift", AppTheme.primary),
                       _buildLegendItem("Unavailability", Colors.redAccent),
-                      _buildLegendItem("AI Suggested", AppTheme.aiGlow),
+                      _buildLegendItem("High Risk Abs.", Colors.orange),
                     ],
                   ),
                 ),
@@ -283,64 +250,112 @@ class _DashboardScreenState extends State<DashboardScreen> {
               
               // Main Grid
               Expanded(
-                child: BlocBuilder<ScheduleBloc, ScheduleState>(
-                  builder: (context, state) {
-                    if (state is ScheduleLoading) {
-                      return Container(
-                        color: AppTheme.background.withOpacity(0.95),
-                        child: Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              const SizedBox(
-                                width: 80,
-                                height: 80,
-                                child: CircularProgressIndicator(
-                                  color: AppTheme.aiGlow,
-                                  strokeWidth: 6,
-                                ),
-                              ),
-                              const SizedBox(height: 32),
-                              Text(
-                                state.message ?? "AI sta lavorando...",
-                                style: const TextStyle(
-                                  color: AppTheme.textPrimary,
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                                textAlign: TextAlign.center,
-                              ),
-                              const SizedBox(height: 12),
-                              Text(
-                                "Generazione schedule per ${SecurityUtils.activeEnvironment}",
-                                style: TextStyle(
-                                  color: AppTheme.textSecondary,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            ],
+                child: Column(
+                  children: [
+                    // Navigation Bar
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 100, 20, 0),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.arrow_back_ios_rounded, color: Colors.white70),
+                            onPressed: () => _navigateWeek(-1),
+                            tooltip: "Previous Week",
                           ),
-                        ),
-                      );
-                    } else if (state is ScheduleError) {
-                      return Center(child: Text("Error: ${state.message}", style: const TextStyle(color: Colors.redAccent)));
-                    } else if (state is ScheduleLoaded) {
-                      if (state.schedules.isEmpty) {
-                        return Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.calendar_today_rounded, size: 64, color: AppTheme.textSecondary.withOpacity(0.3)),
-                              const SizedBox(height: 16),
-                              Text("No values found for ${SecurityUtils.activeEnvironment}", style: TextStyle(color: AppTheme.textSecondary)),
-                            ],
+                          const SizedBox(width: 16),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.05),
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(color: Colors.white.withOpacity(0.1)),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.calendar_today_rounded, color: AppTheme.aiGlow, size: 16),
+                                const SizedBox(width: 12),
+                                Text(
+                                  "${dateFormat.format(_visibleWeekStart)} - ${dateFormat.format(visibleWeekEnd)}",
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1.0,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
-                        );
-                      }
-                      return CalendarGrid(scheduleData: state.schedules.first);
-                    }
-                    return const Center(child: Text("Initializing Engine..."));
-                  },
+                          const SizedBox(width: 16),
+                          IconButton(
+                            icon: const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white70),
+                            onPressed: () => _navigateWeek(1),
+                            tooltip: "Next Week",
+                          ),
+                        ],
+                      ),
+                    ),
+                    
+                    // The Grid
+                    Expanded(
+                      child: BlocBuilder<ScheduleBloc, ScheduleState>(
+                        builder: (context, state) {
+                          if (state is ScheduleLoading) {
+                            return Container(
+                              margin: const EdgeInsets.fromLTRB(20, 20, 20, 20), // Adjusted margins
+                              decoration: AppTheme.glassDecoration(), // Keep style consistent
+                              child: Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const SizedBox(
+                                      width: 60,
+                                      height: 60,
+                                      child: CircularProgressIndicator(
+                                        color: AppTheme.aiGlow,
+                                        strokeWidth: 4,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 24),
+                                    Text(
+                                      state.message ?? "AI sta lavorando...",
+                                      style: const TextStyle(
+                                        color: AppTheme.textPrimary,
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                      textAlign: TextAlign.center,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          } else if (state is ScheduleError) {
+                            return Center(child: Text("Error: ${state.message}", style: const TextStyle(color: Colors.redAccent)));
+                          } else if (state is ScheduleLoaded) {
+                            if (state.schedules.isEmpty) {
+                              return Center(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(Icons.calendar_today_rounded, size: 64, color: AppTheme.textSecondary.withOpacity(0.3)),
+                                    const SizedBox(height: 16),
+                                    Text("No values found for ${SecurityUtils.activeEnvironment}", style: TextStyle(color: AppTheme.textSecondary)),
+                                  ],
+                                ),
+                              );
+                            }
+                            return CalendarGrid(
+                              scheduleData: state.schedules.first,
+                              startDate: _visibleWeekStart, // Pass navigation state
+                            );
+                          }
+                          return const Center(child: Text("Initializing Engine..."));
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -353,13 +368,68 @@ class _DashboardScreenState extends State<DashboardScreen> {
           return FloatingActionButton.extended(
             elevation: isLoading ? 0 : 4,
             backgroundColor: isLoading ? Colors.grey : AppTheme.aiGlow,
-            onPressed: isLoading ? null : () {
-              context.read<ScheduleBloc>().add(
-                GenerateSchedules(
-                  DateTime.now(), 
-                  DateTime.now().add(const Duration(days: 28)) // Full 4-week cycle
-                )
+            onPressed: isLoading ? null : () async {
+              // 1. Show Date Picker
+              final DateTime? picked = await showDatePicker(
+                context: context,
+                initialDate: _visibleWeekStart, // Suggest current view
+                firstDate: DateTime.now().subtract(const Duration(days: 365)),
+                lastDate: DateTime.now().add(const Duration(days: 365)),
+                builder: (context, child) {
+                  return Theme(
+                    data: ThemeData.dark().copyWith(
+                      colorScheme: const ColorScheme.dark(
+                        primary: AppTheme.aiGlow,
+                        onPrimary: Colors.white,
+                        surface: Color(0xFF1E1B4B),
+                        onSurface: Colors.white,
+                      ),
+                      dialogBackgroundColor: const Color(0xFF0F172A),
+                    ),
+                    child: child!,
+                  );
+                },
               );
+
+              if (picked != null) {
+                // 2. Align to Monday
+                final start = _getStartOfWeek(picked);
+                
+                // 3. AI PRE-CHECK: Mostra l'advisor prima di procedere
+                bool proceed = true;
+                final currentState = context.read<ScheduleBloc>().state;
+                if (currentState is ScheduleLoaded) {
+                  final s = currentState;
+                  final result = await showDialog<bool>(
+                    context: context,
+                    builder: (context) => AiAdvisorDialog(
+                      employees: s.employees,
+                      activities: s.activities,
+                      currentConfig: s.demandConfig,
+                      startDate: start,
+                      endDate: start.add(const Duration(days: 28)),
+                    ),
+                  );
+                  proceed = result ?? false;
+                }
+
+                if (!proceed) return; // L'utente ha annullato o chiuso il dialogo
+
+                // 4. Update View
+                setState(() {
+                  _visibleWeekStart = start;
+                });
+                
+                // 5. Trigger Generation (4 Weeks)
+                if (mounted) {
+                   context.read<ScheduleBloc>().add(
+                    GenerateSchedules(
+                      start, 
+                      start.add(const Duration(days: 28))
+                    )
+                  );
+                }
+              }
             },
             label: Text(
               isLoading ? "GENERAZIONE..." : "GENERA TURNI",

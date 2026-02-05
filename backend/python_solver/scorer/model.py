@@ -314,6 +314,11 @@ class NeuralScorer:
             # 3. Project Affinity Bonus (features[10])
             if features[10] > 0.9:
                 heuristic_score += 0.1
+            
+            # 4. Seniority & Punctuality Small Variation (Diversity fix)
+            # Add small +/- 0.05 variation based on seniority (features[7]) and punctuality
+            variation = (features[7] * 0.05) + (features[5] * 0.02) - 0.03
+            heuristic_score += variation
                 
             # Clamp Heuristic
             heuristic_score = max(0.01, min(0.99, heuristic_score))
@@ -321,20 +326,21 @@ class NeuralScorer:
             # 4. Fusion Strategy: "Safety Net"
             # If Heuristic is high (valid role), we NEVER allow the Neural Net to drag it below 0.6
             # This solves the "0% Confidence" bug permanently.
+            # 4. Fusion Strategy: "Safety Net"
+            # If Heuristic is high (valid role), we NEVER allow the Neural Net to drag it below 0.6
             if heuristic_score > 0.7:
                 final_score = max(heuristic_score, neural_score)
             else:
-                # If heuristic is bad (wrong role), we trust the heuristic unless NN is SUPER confident
                 if neural_score > 0.9: 
-                     final_score = neural_score # Maybe the AI knows a secret exception
+                     final_score = neural_score
                 else: 
                      final_score = heuristic_score
             
-            # DEBUG: Log decisions
-            if not hasattr(self, "_debug_count"): self._debug_count = 0
-            if self._debug_count < 5 or final_score < 0.1:
-                print(f"DEBUG HYBRID: RoleMatch={features[0]} -> Heuristic={heuristic_score:.2f}, Neural={neural_score:.4f} => Final={final_score:.4f}")
-                self._debug_count += 1
+            # --- JITTER: Add small unique noise (0-2%) to break ties and ensure variety ---
+            # Use hash of (emp_id + shift_id + random_seed_if_needed)
+            import random
+            jitter = random.uniform(-0.02, 0.02)
+            final_score = max(0.01, min(0.99, final_score + jitter))
             
             return final_score
         except Exception as e:
@@ -374,15 +380,15 @@ class NeuralScorer:
             heuristics = np.clip(heuristics, 0.01, 0.99)
             
             # 3. Hybrid Fusion Logic
-            # Condition A: Good Heuristic (> 0.7) -> Safety Net (Max)
-            # Condition B: Bad Heuristic (< 0.7) but Great Neural (> 0.9) -> Trust Neural
-            # Condition C: Else -> Trust Heuristic
-            
             final_scores = np.where(
                 heuristics > 0.7, 
-                np.maximum(heuristics, neural_scores), # Safety Net
-                np.where(neural_scores > 0.9, neural_scores, heuristics) # Exception or Fallback
+                np.maximum(heuristics, neural_scores), 
+                np.where(neural_scores > 0.9, neural_scores, heuristics)
             )
+            
+            # --- JITTER: Vectorized noise ---
+            jitter = np.random.uniform(-0.02, 0.02, size=final_scores.shape)
+            final_scores = np.clip(final_scores + jitter, 0.01, 0.99)
             
             # Final Sanitization: Ensure NO NaNs escape
             final_scores = np.nan_to_num(final_scores, nan=0.5, posinf=1.0, neginf=0.0)
@@ -404,26 +410,27 @@ class NeuralScorer:
         Trains the model on new data with validation and early stopping.
         Returns a dict of metrics.
         """
+        callbacks = []
         if not self.enabled or self.model is None:
             print("Training skipped: Scorer disabled.")
             return {"loss": 0.0, "val_loss": 0.0, "val_accuracy": 0.5}
 
         print(f"Training on {len(X)} examples...")
         
-        callbacks = []
-        try:
-            from tensorflow.keras.callbacks import EarlyStopping
-            # Stop if validation loss doesn't improve for 3 epochs
-            es = EarlyStopping(
-                monitor='val_loss', 
-                mode='min', 
-                verbose=1, 
-                patience=3, 
-                restore_best_weights=True
-            )
-            callbacks.append(es)
-        except Exception as e:
-            print(f"Warning: Could not initialize EarlyStopping: {e}")
+        if validation_split > 0:
+            try:
+                from tensorflow.keras.callbacks import EarlyStopping
+                # Stop if validation loss doesn't improve for 3 epochs
+                es = EarlyStopping(
+                    monitor='val_loss', 
+                    mode='min', 
+                    verbose=1, 
+                    patience=3, 
+                    restore_best_weights=True
+                )
+                callbacks.append(es)
+            except Exception as e:
+                print(f"Warning: Could not initialize EarlyStopping: {e}")
 
         history = self.model.fit(
             X, y, 

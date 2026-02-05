@@ -1,9 +1,20 @@
 import os
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import firebase_admin
 from firebase_admin import credentials, firestore
 from fastapi import FastAPI, Request
-from routers import schedule, training, ingestion, agent, reports, learning, labor_profiles, sync
+from routers import schedule, training, ingestion, agent, reports, learning, labor_profiles, sync, insights, worker
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+import psutil
+import time
+
+def log_memory(msg=""):
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info().rss / (1024 * 1024)
+    print(f"DIAGNOSTIC: {msg} | Memory: {mem:.2f} MB")
 
 # Initialize Firebase
 try:
@@ -21,10 +32,12 @@ app = FastAPI(title="TimePlanner AI Agent API")
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    print(f"DEBUG: Incoming {request.method} {request.url.path}")
+    log_memory(f"Incoming {request.method} {request.url.path}")
+    start_time = time.time()
     try:
         response = await call_next(request)
-        print(f"DEBUG: Response status: {response.status_code}")
+        duration = time.time() - start_time
+        print(f"DEBUG: Response status: {response.status_code} | Duration: {duration:.2f}s")
         return response
     except Exception as e:
         print(f"CRITICAL: Middleware caught exception: {e}")
@@ -36,7 +49,9 @@ async def log_requests(request: Request, call_next):
         response.headers["Access-Control-Allow-Headers"] = "*"
         return response
 
-# Enable CORS - outermost layer
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Enable CORS - outermost layer (added last)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,6 +69,20 @@ app.include_router(reports.router)
 app.include_router(learning.router)
 app.include_router(labor_profiles.router)
 app.include_router(sync.router)
+app.include_router(insights.router)
+app.include_router(worker.router)
+
+@app.on_event("startup")
+async def startup_event():
+    # RESET LOCK on startup: In case of previous crash, ensure we aren't blocked
+    print("Startup: Clearing any stale locks...")
+    try:
+        from utils.status_manager import set_running
+        set_running(False)
+        print("Startup: Lock cleared.")
+    except Exception as e:
+        print(f"Startup: Warning - could not clear lock: {e}")
+
 
 @app.get("/")
 def read_root():

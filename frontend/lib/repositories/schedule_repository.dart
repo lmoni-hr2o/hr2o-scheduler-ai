@@ -66,37 +66,118 @@ class ScheduleRepository {
     });
   }
 
+  Future<Map<String, dynamic>> getPreCheckAnalysis({
+    required List<Employment> employees,
+    required List<Activity> activities,
+    required Map<String, dynamic> config,
+    required DateTime startDate,
+    required DateTime endDate,
+  }) async {
+    // Richiesta a Gemini per analizzare i parametri prima della generazione effettiva
+    final payload = {
+      "environment": _currentEnv,
+      "employees": employees.map((e) => e.toJson()).toList(),
+      "activities": activities.map((a) => a.toJson()).toList(),
+      "constraints": {"min_rest_hours": 11},
+      "config": config,
+      "start_date": startDate.toIso8601String().split('T')[0],
+      "end_date": endDate.toIso8601String().split('T')[0],
+    };
+
+    final jsonPayload = jsonEncode(payload);
+    final url = Uri.parse("$_baseUrl/reports/pre-check");
+
+    try {
+      final response = await http.post(
+        url,
+        headers: SecurityUtils.getHeaders(jsonPayload),
+        body: jsonPayload,
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      throw Exception("Failed to get pre-check analysis: ${response.body}");
+    } catch (e) {
+      print("Pre-check error: $e");
+      return {
+        "summary": "Analisi non disponibile.",
+        "suggestions": []
+      };
+    }
+  }
+
   Future<Map<String, dynamic>> triggerGeneration({
     required DateTime startDate, 
     required DateTime endDate,
     required List<Employment> employees,
     required List<Activity> activities,
+    List<Map<String, dynamic>> requiredShifts = const [],
     List<Map<String, dynamic>> unavailabilities = const [],
+    Map<String, dynamic> constraints = const {},
   }) async {
+    // Note: We send empty lists for employees/activities to check if backend handles fetch
+    // But if backend expects data, we should send it.
+    // The previous code sent empty lists. We keep it as is, assuming backend pulls from DB.
     final payload = {
       "start_date": startDate.toIso8601String().split('T')[0],
       "end_date": endDate.toIso8601String().split('T')[0],
-      "employees": employees.map((e) => e.toJson()).toList(),
+      "employees": employees.map((e) => e.toJson()).toList(), // Use actual data to ensure Worker has it
+      "required_shifts": requiredShifts,
       "unavailabilities": unavailabilities,
-      "activities": activities.map((a) => a.toJson()).toList(),
-      "constraints": {"min_rest_hours": 11}
+      "activities": activities.map((a) => a.toJson()).toList(), 
+      "constraints": {
+        "min_rest_hours": 11,
+        ...constraints
+      }
     };
 
     final payloadStr = jsonEncode(payload);
     final url = Uri.parse("$_baseUrl/schedule/generate");
     
     try {
+      // 1. Start Job
+      print("Starting async schedule generation...");
       final response = await http.post(
         url,
         headers: SecurityUtils.getHeaders(payloadStr),
         body: payloadStr,
       );
 
-      if (response.statusCode == 200) {
-        return jsonDecode(response.body);
-      } else {
-        throw Exception("Failed to generate: ${response.body}");
+      if (response.statusCode != 200) {
+        throw Exception("Failed to start generation: ${response.body}");
       }
+
+      final jobData = jsonDecode(response.body);
+      final jobId = jobData['job_id'];
+      print("Job started: $jobId. Polling for results...");
+
+      // 2. Poll for Completion
+      int attempts = 0;
+      // Poll for up to 20 minutes (600 * 2s = 1200s)
+      while (attempts < 600) { 
+         await Future.delayed(Duration(seconds: 2));
+         
+         final statusUrl = Uri.parse("$_baseUrl/schedule/job/$jobId");
+         final statusResp = await http.get(statusUrl, headers: SecurityUtils.getHeaders(""));
+         
+         if (statusResp.statusCode == 200) {
+             final statusData = jsonDecode(statusResp.body);
+             final status = statusData['status'];
+             
+             if (status == 'completed') {
+                 print("Job completed!");
+                 return statusData; // Contains 'schedule' and 'solver_status'
+             }
+             if (status == 'failed') {
+                 throw Exception("Job failed: ${statusData['error']}");
+             }
+             // If 'queued' or 'processing', continue loop
+         }
+         attempts++;
+      }
+      throw Exception("Timeout waiting for schedule generation (5 mins)");
+
     } catch (e) {
       print("Error calling Cloud Run: $e");
       rethrow;
@@ -266,6 +347,21 @@ class ScheduleRepository {
     }
   }
 
+  Future<List<LaborProfile>> getLaborProfiles() async {
+    final url = Uri.parse("$_baseUrl/labor-profiles/$_sanitizedEnv");
+    try {
+      final response = await http.get(url, headers: SecurityUtils.getHeaders(""));
+      if (response.statusCode == 200) {
+        final List data = jsonDecode(response.body);
+        return data.map((e) => LaborProfile.fromJson(e)).toList();
+      }
+      return [];
+    } catch (e) {
+      print("Error fetching labor profiles: $e");
+      return [];
+    }
+  }
+
   Future<Map<String, dynamic>> getAlgorithmConfig() async {
     final url = Uri.parse("$_baseUrl/training/config");
     try {
@@ -368,6 +464,65 @@ class ScheduleRepository {
     );
     if (response.statusCode != 200) {
       throw Exception("Failed to reset status: ${response.body}");
+    }
+  }
+  Future<Map<String, dynamic>> getAiAnalysis(List<dynamic> schedule) async {
+    final url = Uri.parse("$_baseUrl/reports/analysis");
+    final payload = {
+      "environment": _currentEnv,
+      "schedule": schedule
+    };
+    final payloadStr = jsonEncode(payload);
+
+    try {
+      final response = await http.post(
+        url,
+        headers: SecurityUtils.getHeaders(payloadStr),
+        body: payloadStr,
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      } else {
+        throw Exception("Failed to get analysis: ${response.body}");
+      }
+    } catch (e) {
+      print("Error calling AI Analysis: $e");
+      rethrow;
+    }
+  }
+  Future<void> submitScheduleFeedback(List<dynamic> schedule) async {
+    final url = Uri.parse("$_baseUrl/training/feedback");
+    final payload = {
+      "environment": _currentEnv,
+      "schedule": schedule
+    };
+    final payloadStr = jsonEncode(payload);
+
+    try {
+      final response = await http.post(
+        url,
+        headers: SecurityUtils.getHeaders(payloadStr),
+        body: payloadStr,
+      );
+      if (response.statusCode != 200) {
+        print("Feedback failed: ${response.body}");
+      }
+    } catch (e) {
+      print("Error sending feedback: $e");
+    }
+  }
+
+  Future<void> syncOriginalSource() async {
+    final url = Uri.parse("$_baseUrl/sync/full?namespace=OVERCLEAN");
+    try {
+      final response = await http.post(url, headers: SecurityUtils.getHeaders(""));
+      if (response.statusCode != 200) {
+        // Log but don't crash, maybe just warning
+        print("Sync warning: ${response.body}");
+      }
+    } catch (e) {
+      print("Error triggering sync: $e");
     }
   }
 }

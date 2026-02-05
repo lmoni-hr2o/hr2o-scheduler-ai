@@ -13,8 +13,13 @@ import 'shift_card.dart';
 
 class CalendarGrid extends StatefulWidget {
   final Map<String, dynamic> scheduleData;
+  final DateTime startDate; // New: Controls the visible week
 
-  const CalendarGrid({super.key, required this.scheduleData});
+  const CalendarGrid({
+    super.key, 
+    required this.scheduleData,
+    required this.startDate,
+  });
 
   @override
   State<CalendarGrid> createState() => _CalendarGridState();
@@ -43,6 +48,14 @@ class _CalendarGridState extends State<CalendarGrid> {
     super.dispose();
   }
 
+  String _normalizeName(String? name) {
+    if (name == null || name.isEmpty) return "";
+    // Remove symbols, uppercase, split, sort, join to catch word swaps
+    final clean = name.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9\s]'), '');
+    final words = clean.trim().split(RegExp(r'\s+'))..sort();
+    return words.join(' ');
+  }
+
   @override
   Widget build(BuildContext context) {
     final days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -52,21 +65,20 @@ class _CalendarGridState extends State<CalendarGrid> {
     }
 
     final s = state;
-    // FIXED: Show all employees, not just those with history.
-    // The previous filter hidden employees causing "invisible shifts".
-    final activeEmployees = s.employees;
+    // FIXED: Deduplicate primarily by normalized name to handle multiple sync IDs and word swaps
+    final seenNames = <String>{};
+    final activeEmployees = s.employees.where((e) {
+      final nameKey = _normalizeName(e.fullName);
+      if (nameKey.isEmpty || seenNames.contains(nameKey)) return false;
+      seenNames.add(nameKey);
+      return true;
+    }).toList();
     
     final unavailabilities = s.unavailabilities;
     final List<dynamic> shifts = widget.scheduleData['schedule'] ?? [];
 
-    // Calculate Week Start for real dates
-    DateTime weekStart = DateTime.now().subtract(Duration(days: DateTime.now().weekday - 1));
-    if (shifts.isNotEmpty) {
-      try {
-        final firstDate = DateTime.parse(shifts.first['date']);
-        weekStart = firstDate.subtract(Duration(days: firstDate.weekday - 1));
-      } catch (_) {}
-    }
+    // Use passed startDate (aligned to Monday by parent)
+    final DateTime weekStart = widget.startDate;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 100, 20, 20),
@@ -154,31 +166,52 @@ class _CalendarGridState extends State<CalendarGrid> {
       child: Row(
         children: [
           // Sidebar: Employee Name
-          SizedBox(
-            width: 140,
-            height: 100,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                CircleAvatar(
-                  radius: 14,
-                  backgroundColor: AppTheme.accent.withOpacity(0.1),
-                  child: Text(emp.fullName.isNotEmpty ? emp.fullName[0] : "?", style: const TextStyle(color: AppTheme.accent, fontSize: 10, fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(height: 6),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Text(
-                    emp.fullName.split(' ').first,
-                    style: const TextStyle(color: AppTheme.textPrimary, fontSize: 10, fontWeight: FontWeight.w600),
-                    overflow: TextOverflow.ellipsis,
+          InkWell(
+            onTap: () => _showEmployeeProfile(context, emp),
+            child: SizedBox(
+              width: 140,
+              height: 100,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircleAvatar(
+                    radius: 14,
+                    backgroundColor: AppTheme.accent.withOpacity(0.1),
+                    child: Text(emp.fullName.isNotEmpty ? emp.fullName[0] : "?", style: const TextStyle(color: AppTheme.accent, fontSize: 10, fontWeight: FontWeight.bold)),
                   ),
-                ),
-                Text(
-                  emp.role.toUpperCase(),
-                  style: TextStyle(color: AppTheme.textSecondary, fontSize: 7, fontWeight: FontWeight.w900, letterSpacing: 0.5),
-                ),
-              ],
+                  const SizedBox(height: 6),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Text(
+                      emp.fullName.split(' ').first,
+                      style: const TextStyle(color: AppTheme.textPrimary, fontSize: 10, fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Text(
+                    emp.role.toUpperCase(),
+                    style: TextStyle(color: AppTheme.textSecondary, fontSize: 7, fontWeight: FontWeight.w900, letterSpacing: 0.5),
+                  ),
+                  const SizedBox(height: 4),
+                  // Contract Badge
+                  if (emp.contractType != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.05),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.white.withOpacity(0.1)),
+                    ),
+                    child: Text(
+                      "${emp.contractType ?? ''} ${emp.contractHours != null ? '${emp.contractHours!.toInt()}h' : ''}",
+                      style: const TextStyle(color: AppTheme.accent, fontSize: 7, fontWeight: FontWeight.bold),
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           // Calendar Cells
@@ -204,18 +237,36 @@ class _CalendarGridState extends State<CalendarGrid> {
                   builder: (context, candidates, rejects) {
                     final cellDate = weekStart.add(Duration(days: d));
                     final dateStr = cellDate.toIso8601String().split('T')[0];
-                    final isUnavailable = unavailabilities.any((u) => u['employee_id'] == emp.id && u['date'] == dateStr);
+                    final isUnavailable = unavailabilities.any((u) {
+                      final bool matchId = u['employee_id'] == emp.id;
+                      // Fallback case: if unavailability was linked to an alternative ID, it might not match by ID 
+                      // but we assume it follows the person's name or the provided employee reference matches.
+                      return matchId && u['date'] == dateStr;
+                    });
 
                     final cellShifts = shifts.where((s) {
                       try {
                         if (s['date'] == null) return false;
                         final shiftDate = DateTime.parse(s['date']);
-                        return s['employee_id'] == emp.id && shiftDate.year == cellDate.year && shiftDate.month == cellDate.month && shiftDate.day == cellDate.day;
+                        // Match by ID OR by Normalized Full Name for robust deduplication mapping
+                        final bool matchId = s['employee_id'] == emp.id;
+                        final String shiftName = _normalizeName(s['employee_name']?.toString());
+                        final String rowName = _normalizeName(emp.fullName);
+                        final bool matchName = shiftName.isNotEmpty && shiftName == rowName;
+                        
+                        return (matchId || matchName) && 
+                               shiftDate.year == cellDate.year && 
+                               shiftDate.month == cellDate.month && 
+                               shiftDate.day == cellDate.day;
                       } catch (e) { return false; }
                     }).toList();
                     
                     final hasHistory = state.historicalSchedules.any((hp) {
-                      return hp['employee_id'] == emp.id && hp['date'] == dateStr;
+                      final bool matchId = hp['employee_id'] == emp.id;
+                      final String histName = _normalizeName(hp['fullName']?.toString());
+                      final String rowName = _normalizeName(emp.fullName);
+                      final bool matchName = histName.isNotEmpty && histName == rowName;
+                      return (matchId || matchName) && hp['date'] == dateStr;
                     });
 
                     Color borderColor = hasHistory ? Colors.amber.withOpacity(0.4) : Colors.white.withOpacity(0.05);
@@ -268,6 +319,7 @@ class _CalendarGridState extends State<CalendarGrid> {
                                           return ShiftCard(
                                             shift: s,
                                             affinity: s['affinity']?.toDouble(),
+                                            absenceRisk: s['absence_risk']?.toDouble(),
                                             historicalTime: histTime,
                                             activities: state.activities,
                                           );
@@ -282,6 +334,71 @@ class _CalendarGridState extends State<CalendarGrid> {
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  void _showEmployeeProfile(BuildContext context, Employment emp) {
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            CircleAvatar(
+              backgroundColor: AppTheme.primary,
+              child: Text(emp.fullName.isNotEmpty ? emp.fullName[0] : "?", style: const TextStyle(color: Colors.white)),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(emp.fullName, style: const TextStyle(color: Colors.white, fontSize: 16)),
+                  Text(emp.role, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Divider(color: Colors.white24),
+            const SizedBox(height: 8),
+            _buildProfileRow("Tipo Contratto", emp.contractType ?? "N/D"),
+            _buildProfileRow("Ore Settimanali", emp.contractHours != null ? "${emp.contractHours}h" : "N/D"),
+            _buildProfileRow("Qualifica", emp.qualification ?? "N/D"),
+            _buildProfileRow("Azienda", emp.name),
+            _buildProfileRow("Data Assunzione", emp.bornDate != null ? emp.bornDate!.substring(0, 10) : "N/D"), // Using bornDate as placeholder if dtHired is missing in Model
+            const SizedBox(height: 16),
+            const Text("Performance & AI", style: TextStyle(color: AppTheme.aiGlow, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 4),
+            _buildProfileRow("Keyword Clienti", emp.customerKeywords.isNotEmpty ? emp.customerKeywords.join(", ") : "Nessuna"),
+          ],
+        ),
+        actions: [
+          TextButton(
+            child: const Text("CHIUDI", style: TextStyle(color: Colors.white)),
+            onPressed: () => Navigator.pop(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProfileRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+          Text(value, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12)),
         ],
       ),
     );
@@ -332,20 +449,20 @@ class HeatmapPainter extends CustomPainter {
       if (count < target - 1) {
         // Critical: Red (Understaffed)
         gradientColors = [
-          Colors.redAccent.withOpacity(0.15),
-          Colors.redAccent.withOpacity(0.05),
+          AppTheme.danger.withOpacity(0.15),
+          AppTheme.danger.withOpacity(0.05),
         ];
       } else if (count > target + 1) {
-        // Excess: Blue (Overstaffed)
+        // Excess: Indigo (Overstaffed)
         gradientColors = [
-          Colors.blueAccent.withOpacity(0.15),
-          Colors.blueAccent.withOpacity(0.05),
+          AppTheme.primary.withOpacity(0.15),
+          AppTheme.primary.withOpacity(0.05),
         ];
       } else {
         // Optimal: Green
         gradientColors = [
-          Colors.greenAccent.withOpacity(0.15),
-          Colors.greenAccent.withOpacity(0.05),
+          AppTheme.accent.withOpacity(0.15),
+          AppTheme.accent.withOpacity(0.05),
         ];
       }
 

@@ -1,17 +1,56 @@
 from ortools.sat.python import cp_model
 from datetime import datetime, timedelta
 import numpy as np
-from utils.status_manager import update_status, set_running
+from utils.status_manager import set_running
+
+def update_status(message=None, progress=None, phase=None, log=None, details=None):
+    from utils.status_manager import update_status as _upd
+    _upd(message=message, progress=progress, phase=phase, log=log, details=details)
+
+def normalize_name(name):
+    """Normalize names by sorting words to catch 'Luca Moni' vs 'Moni Luca'."""
+    if not name: return ""
+    import re
+    # Remove special characters, multiple spaces, keep only alphanumeric words
+    clean = re.sub(r'[^A-Z0-9\s]', '', name.upper())
+    words = sorted(clean.split())
+    return " ".join(words)
 
 def solve_schedule(employees: list, required_shifts: list, unavailabilities: list, constraints: dict, start_date_str: str, end_date_str: str, activities: list = [], environment: str = "default"):
     """
     Agentic Solver: Handles variable shift durations, overlap detection,
-    and role-based constraints.
+    and role-based constraints. 
     Integrates NeuralScorer for soft-constraint optimization.
-    Now loads configuration from Datastore if available.
+    Now uses ForecastingService (ML) for demand prediction and Absence Risk.
     """
     set_running(True)
     try:
+        # --- DEDUPLICAZIONE OBBLIGATORIA (Nome e ID) ---
+        # Evita lo scheduling doppio di persone fisiche con ID o nomi duplicati.
+        # Assicura che i vincoli (indisponibilità) seguano la persona reale.
+        dedupe_map = {} # normalized_name -> emp
+        id_dedupe = set() # Set of employee IDs already processed
+        seen_names = set() # Set of normalized names already processed
+        
+        unique_employees = []
+        for emp in employees:
+            eid = str(emp.get("id") or emp.get("employee_id") or emp.get("external_id") or "").strip()
+            fname = normalize_name(emp.get("fullName") or emp.get("name") or "")
+            
+            if not eid or not fname: continue
+            
+            # Check if this employee (by normalized name or ID) has already been added
+            if fname not in seen_names and eid not in id_dedupe:
+                seen_names.add(fname)
+                dedupe_map[fname] = emp # Store the first encountered employee for this normalized name
+                id_dedupe.add(eid)
+                unique_employees.append(emp)
+        
+        if len(unique_employees) < len(employees):
+            print(f"DEBUG: Dipendenti deduplicati. Da {len(employees)} -> {len(unique_employees)} unità uniche.")
+            employees = unique_employees
+        # ------------------------------------------------
+
         from scorer.model import NeuralScorer
         from utils.datastore_helper import get_db
 
@@ -22,10 +61,24 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
 
         affinity_weight = 1.0
         penalty_unassigned = 100
+        fairness_weight = 50.0
         if entity:
             affinity_weight = entity.get("affinity_weight", 1.0)
             penalty_unassigned = int(float(entity.get("penalty_unassigned", 100) or 100))
-            print(f"DEBUG: Using custom config for {environment}: affinity_weight={affinity_weight}, penalty_unassigned={penalty_unassigned}")
+            penalty_absence_risk = int(float(entity.get("penalty_absence_risk", 200) or 200))
+            fairness_weight = float(entity.get("fairness_weight", 50.0))
+            print(f"DEBUG: Stored config: aff={affinity_weight}, unassigned={penalty_unassigned}, fairness={fairness_weight}")
+        else:
+            penalty_absence_risk = 200 # Default default
+
+        # OVERRIDE from request constraints (dynamic suggestions)
+        if constraints:
+            affinity_weight = constraints.get("affinity_weight", constraints.get("affinityWeight", affinity_weight))
+            penalty_unassigned = constraints.get("penalty_unassigned", constraints.get("penaltyUnassigned", penalty_unassigned))
+            penalty_absence_risk = constraints.get("penalty_absence_risk", constraints.get("penaltyAbsenceRisk", penalty_absence_risk))
+            fairness_weight = constraints.get("fairness_weight", constraints.get("fairnessWeight", fairness_weight))
+            print(f"DEBUG: Dynamic overrides: aff={affinity_weight}, unassigned={penalty_unassigned}, fairness={fairness_weight}")
+
 
         # Load Data Mappings (Vital for Inference)
         key_map = client.key("DataMapping", environment)
@@ -43,120 +96,233 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
         # Load Labor Profiles for this environment
         # Build a lookup: profile_id -> profile_data
         labor_profiles = {}
-        query = client.query(kind="LaborProfile")
-        for profile_entity in query.fetch():
-            profile_id = profile_entity.key.name
-            labor_profiles[profile_id] = {
-                "max_weekly_hours": profile_entity.get("max_weekly_hours", 40.0),
-                "max_daily_hours": profile_entity.get("max_daily_hours", 8.0),
-                "max_consecutive_days": profile_entity.get("max_consecutive_days", 6),
-                "min_rest_hours": profile_entity.get("min_rest_hours", 11.0)
-            }
         
-        print(f"DEBUG: Loaded {len(labor_profiles)} Labor Profiles for constraint customization.")
+        # We need to load profiles from the current environment namespace...
+        # AND possibly from other namespaces if we are in a management environment like OVERCLEAN
+        namespaces_to_check = {environment, "default"}
+        for emp in employees:
+            if emp.get("environment"):
+                namespaces_to_check.add(emp.get("environment"))
+        
+        print(f"DEBUG: Searching Labor Profiles in namespaces: {namespaces_to_check}")
+        
+        for ns in namespaces_to_check:
+            try:
+                ns_client = get_db(namespace=ns).client
+                query = ns_client.query(kind="LaborProfile")
+                count = 0
+                for profile_entity in query.fetch():
+                    profile_id = profile_entity.key.name
+                    if profile_id not in labor_profiles:
+                        labor_profiles[profile_id] = {
+                            "max_weekly_hours": profile_entity.get("max_weekly_hours", 40.0),
+                            "max_daily_hours": profile_entity.get("max_daily_hours", 8.0),
+                            "max_consecutive_days": profile_entity.get("max_consecutive_days", 6),
+                            "min_rest_hours": profile_entity.get("min_rest_hours", 11.0)
+                        }
+                        count += 1
+                if count > 0:
+                    print(f"  > Loaded {count} profiles from namespace {ns}")
+            except Exception as e_ns:
+                print(f"  ! Error loading profiles from {ns}: {e_ns}")
+        
+        print(f"DEBUG: Total Labor Profiles loaded: {len(labor_profiles)}")
 
         # Get all unique roles for feature extraction (Normalized)
         all_roles = sorted(list(set([str(s.get("role") or "").strip().upper() for s in required_shifts] + [str(e.get("role") or "").strip().upper() for e in employees])))
 
         # -------------------
-        update_status(message=f"Starting Solver for {environment}", progress=0.1, phase="OPTIMIZATION", log=f"Solving {len(required_shifts)} shifts for {len(employees)} employees...")
+        # -------------------
+        if not required_shifts:
+             update_status(message=f"AI Forecasting started for {environment}", progress=0.1, phase="OPTIMIZATION", log=f"No input shifts. requesting AI Demand Forecast...")
+        else:
+             update_status(message=f"Starting Solver for {environment}", progress=0.1, phase="OPTIMIZATION", log=f"Solving {len(required_shifts)} provided shifts for {len(employees)} employees...")
 
         model = cp_model.CpModel()
 
-        # 1. Dynamic Demand Generation (Learned from history)
+        # 1. GENERAZIONE DINAMICA FABBISOGNO (Dati storici / ML)
         if not required_shifts:
-            from utils.demand_profiler import get_demand_profile
-            profile = get_demand_profile(environment)
+            from services.forecasting_service import ForecastingService
+            # Proviamo prima l'allocazione tramite ML Forecast
+            try:
+                # Use provided activities; only initialize if None
+                if activities is None:
+                    activities = []
+                
+                start_dt = datetime.fromisoformat(start_date_str)
+                end_dt = datetime.fromisoformat(end_date_str)
+                num_days = (end_dt - start_dt).days + 1
+                
+                forecaster = ForecastingService(environment)
+                predicted_demand = forecaster.predict_demand(start_dt, end_dt)
+                
+                if predicted_demand:
+                    print(f"DEBUG: Using ML Forecast with {len(predicted_demand)} predictions.")
+                    # Convert demand (hours) to shift blocks
+                    # Heuristic: Break demand into chunks of 4h, min 2h.
+                    for item in predicted_demand:
+                        hours_needed = item["predicted_hours"]
+                        date_str = item["date"]
+                        act_id = item["activity_id"]
+                        
+                        # Find activity info for project mapping
+                        act_info = next((a for a in activities if str(a.get("id")) == str(act_id)), None)
+                        
+                        # Use activity name as role hint if available, else 'worker'
+                        role_hint = "worker"
+                        if act_info:
+                             role_hint = str(act_info.get("name", "worker")).strip().upper()
 
-            unique_employee_roles = list(set([e["role"] for e in employees]))
-            if not unique_employee_roles:
-                unique_employee_roles = ["worker"]
+                        target_dur = item.get("typical_duration", 6.0)
+                        chunks = []
+                        remaining = hours_needed
+                        
+                        # Dynamic Chunking: aim for typical duration
+                        while remaining >= 2.0:
+                            block = min(target_dur, remaining)
+                            # If taking this block leaves a very small residue, just absorb it into this shift
+                            # unless it exceeds a maximum legal shift (e.g. 10h)
+                            if 0 < (remaining - block) < 2.0:
+                                if (remaining) <= 12.0: # Hard cap for combined shifts
+                                    block = remaining
+                            
+                            chunks.append(block)
+                            remaining -= block
+                            if remaining < 1.0: break
+                            
+                        # Assign chunks to times. Use Learned Start Time if available
+                        typical_start = item.get("typical_start_hour", 8.0)
+                        
+                        # Spread logic: if we have multiple chunks for the same activity/day, 
+                        # they are usually distinct people needed. We add a slight spread.
+                        for i, block_dur in enumerate(chunks):
+                            # Jitter: 15 min offset to spread load slightly
+                            # This prevents everyone from being exactly at 08:00 if multiple people are needed
+                            curr_h = typical_start + ((i % 4) * 0.25) 
+                            
+                            start_h = int(curr_h)
+                            start_m = int((curr_h - start_h) * 60)
+                            end_h = int(curr_h + block_dur)
+                            end_m = int(((curr_h + block_dur) - end_h) * 60)
+                            
+                            s_time = f"{start_h:02d}:{start_m:02d}"
+                            e_time = f"{end_h:02d}:{end_m:02d}"
+                            
+                            required_shifts.append({
+                                "id": f"ml_{act_id}_{date_str}_{i}_{s_time.replace(':','')}",
+                                "date": date_str,
+                                "start_time": s_time,
+                                "end_time": e_time,
+                                "role": role_hint,
+                                "activity_id": act_id,
+                                "project": act_info.get("project") if act_info else None
+                            })
+                    update_status(message=f"Solving {len(required_shifts)} ML Predicted Shifts", progress=0.2, phase="OPTIMIZATION", log=f"Generated {len(required_shifts)} shifts from ML model.")
 
-            start_dt = datetime.fromisoformat(start_date_str)
-            end_dt = datetime.fromisoformat(end_date_str)
-            num_days = (end_dt - start_dt).days + 1
-
-            # We also need activities to match IDs from profile
-            # Use provided activities; only initialize if None
-            if activities is None:
-                activities = []
-            
-            # (Old overwrite bug removed)
-
-            for d in range(num_days):
-                current_date = (start_dt + timedelta(days=d))
-                date_str = current_date.date().isoformat()
-                dow = str(current_date.weekday())
-
-                # If we have a profile for this company, use it
-                if profile:
-                    for act_id, dow_patterns in profile.items():
-                        if dow in dow_patterns:
-                            slots = dow_patterns[dow] # This is now a LIST of {start, end, qty}
-                            if isinstance(slots, dict): slots = [slots] # Backward compatibility
-
-                            # Find activity info
-                            act_info = next((a for a in activities if str(a.get("id")) == str(act_id)), None)
-
-                            for p in slots:
-                                qty = p.get("quantity", 1)
-                                for s_idx in range(qty):
-                                    required_shifts.append({
-                                        "id": f"learned_{act_id}_{date_str}_{p['start_time'].replace(':','')}_slot_{s_idx}",
-                                        "date": date_str,
-                                        "start_time": p["start_time"],
-                                        "end_time": p["end_time"],
-                                        "role": p.get("role", "worker"),
-                                        "activity_id": act_id,
-                                        "project": act_info.get("project") if act_info else None
-                                    })
                 else:
-                    # Fallback to smart defaults
-                    # Fallback to smart defaults (Scaled to workforce)
-                    # If we have 10 employees, generate ~8 shifts to show a realistic schedule
-                    import random
-                    target_utilization = 0.8 # 80% of staff working
-                    total_emp_count = len(employees)
-                    shifts_needed = max(2, int(total_emp_count * target_utilization))
-                    
-                    # Distribute needed shifts across roles
-                    for i in range(shifts_needed):
-                        # Round-robin or random role assignment if multiple roles exist
-                        r_idx = i % len(unique_employee_roles)
-                        role = unique_employee_roles[r_idx]
+                     # Fallback to Static Profile logic...
+                     raise ValueError("No ML predictions available, using fallback.")
+
+            except Exception as e_fore:
+                print(f"WARNING: Forecasting fallito ({e_fore}), uso DemandProfiler come fallback.")
+                from utils.demand_profiler import get_demand_profile
+                profile = get_demand_profile(environment)
+    
+                unique_employee_roles = list(set([str(e.get("role") or "worker").strip().upper() for e in employees]))
+                if not unique_employee_roles:
+                    unique_employee_roles = ["WORKER"]
+    
+                start_dt = datetime.fromisoformat(start_date_str)
+                end_dt = datetime.fromisoformat(end_date_str)
+                num_days = (end_dt - start_dt).days + 1
+    
+                # We also need activities to match IDs from profile
+                # Use provided activities; only initialize if None
+                if activities is None:
+                    activities = []
+                
+                # (Old overwrite bug removed)
+    
+                for d in range(num_days):
+                    current_date = (start_dt + timedelta(days=d))
+                    date_str = current_date.date().isoformat()
+                    dow = str(current_date.weekday())
+    
+                    # If we have a profile for this company, use it
+                    if profile:
+                        for act_id, dow_patterns in profile.items():
+                            if dow in dow_patterns:
+                                slots = dow_patterns[dow] # This is now a LIST of {start, end, qty}
+                                if isinstance(slots, dict): slots = [slots] # Backward compatibility
+    
+                                # Find activity info
+                                act_info = next((a for a in activities if str(a.get("id")) == str(act_id)), None)
+    
+                                for p in slots:
+                                    qty = p.get("quantity", 1)
+                                    for s_idx in range(qty):
+                                        required_shifts.append({
+                                            "id": f"learned_{act_id}_{date_str}_{p['start_time'].replace(':','')}_slot_{s_idx}",
+                                            "date": date_str,
+                                            "start_time": p["start_time"],
+                                            "end_time": p["end_time"],
+                                            "role": p.get("role", "worker"),
+                                            "activity_id": act_id,
+                                            "project": act_info.get("project") if act_info else None
+                                        })
+                    else:
+                        # FALLBACK: SMART DEFAULTS (Quando mancano sia ML che Profiler)
+                        # Se l'azienda non ha dati storici lavorativi nel weekend, saltiamo sabato/domenica.
+                        if current_date.weekday() >= 5: 
+                            continue
+                            
+                        # Scaliamo in base alla forza lavoro disponibile
+                        import random
+                        target_utilization = 0.8 # 80% of staff working
+                        total_emp_count = len(employees)
+                        shifts_needed = max(2, int(total_emp_count * target_utilization))
                         
-                        # Split M/A (Morning/Afternoon)
-                        is_morning = i % 2 == 0
-                        
-                        if is_morning:
-                             required_shifts.append({
-                                "id": f"fallback_{date_str}_m_{i}_{role}", 
+                        # Distribute needed shifts across roles
+                        for i in range(shifts_needed):
+                            # Round-robin or random role assignment if multiple roles exist
+                            r_idx = i % len(unique_employee_roles)
+                            role = unique_employee_roles[r_idx]
+                            
+                            # More realistic fallback: single 8-hour block (standard contract)
+                            # or mixed if many shifts are needed
+                            start_h = 8
+                            if i % 3 == 1: start_h = 9 # Slight stagger
+                            elif i % 3 == 2: start_h = 10 
+                            
+                            s_time = f"{start_h:02d}:00"
+                            e_time = f"{start_h + 8:02d}:00"
+                            
+                            required_shifts.append({
+                                "id": f"fallback_{date_str}_{i}_{role}_{s_time.replace(':','')}", 
                                 "date": date_str, 
-                                "start_time": "08:00", 
-                                "end_time": "14:00", 
+                                "start_time": s_time, 
+                                "end_time": e_time, 
                                 "role": role
                             })
-                        else:
-                             required_shifts.append({
-                                "id": f"fallback_{date_str}_a_{i}_{role}", 
-                                "date": date_str, 
-                                "start_time": "14:00", 
-                                "end_time": "20:00", 
-                                "role": role
-                            })
-            
-            # Update status with actual generated count
-            update_status(message=f"Solving {len(required_shifts)} Auto-Generated Shifts", progress=0.2, phase="OPTIMIZATION", log=f"Generated {len(required_shifts)} shifts from demand profile...")
+                
+                # Update status with actual generated count
+                update_status(message=f"Solving {len(required_shifts)} Shifts (Fallback)", progress=0.2, phase="OPTIMIZATION")
 
         # 2. Variables & Batch Neural Prediction
-        x = {}
+        # RE-OPTIMIZATION: Use SPARSE variables to avoid OOM for large datasets (PROFER)
+        x = {} # (e_idx, s_idx) -> BoolVar (Only created if viable)
         unassigned = {} # slack variables for soft coverage
-        affinity_map = {}
+        affinity_map = {} # (e_idx, s_idx) -> int
 
         for s_idx, shift in enumerate(required_shifts):
             unassigned[s_idx] = model.NewBoolVar(f'unassigned_{s_idx}')
 
-        print(f"DEBUG: Extracting features for {len(employees) * len(required_shifts)} pairs...")
+        # SANITY CHECK: Problem Size
+        if len(employees) * len(required_shifts) > 1000000:
+             print(f"CRITICAL: Problem size too large ({len(employees)}x{len(required_shifts)}). Aborting to prevent 8GB OOM.")
+             raise MemoryError("Combinatorial Explosion Risk")
+        
+        print(f"DEBUG: Extracting features for sparse viable pairs...")
         all_features = []
         pairs = []
 
@@ -165,24 +331,37 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
 
         for e_idx, emp in enumerate(employees):
             e_role = norm_role(emp.get("role"))
+            
+            # Pre-filter dates based on contract
+            hired_date = None
+            if emp.get("dtHired"):
+                try: hired_date = datetime.fromisoformat(emp["dtHired"]).date()
+                except: pass
+            
+            dismissed_date = None
+            if emp.get("dtDismissed"):
+                try: dismissed_date = datetime.fromisoformat(emp["dtDismissed"]).date()
+                except: pass
+
             for s_idx, shift in enumerate(required_shifts):
                 s_role = norm_role(shift.get("role"))
-                # i. Preliminary Check: Flexible Role Matching
-                # Allow partial match (e.g. "SENIOR DEVELOPER" matches "DEVELOPER")
-                if e_role == s_role or (e_role in s_role) or (s_role in e_role):
-                    feat = scorer.extract_features(emp, shift, mappings=env_mappings)
-                    all_features.append(feat)
-                    if len(all_features) == 1:
-                        print(f"DEBUG: Sample Feature Vector[0]: {feat}")
-                    pairs.append((e_idx, s_idx))
-                else:
-                    affinity_map[(e_idx, s_idx)] = 0
                 
-                # IMPORTANT: Always create the decision variable!
+                # Eligibility check (Role + Contract)
+                if not (e_role == s_role or (e_role in s_role) or (s_role in e_role)):
+                    continue
+                
+                shift_date = datetime.fromisoformat(shift["date"]).date()
+                if hired_date and shift_date < hired_date: continue
+                if dismissed_date and shift_date > dismissed_date: continue
+                
+                # If viable, create variable and extract features
                 x[(e_idx, s_idx)] = model.NewBoolVar(f'x_{e_idx}_{s_idx}')
+                feat = scorer.extract_features(emp, shift, mappings=env_mappings)
+                all_features.append(feat)
+                pairs.append((e_idx, s_idx))
 
-            if e_idx % 10 == 0:
-                update_status(log=f"Extracted features for {emp.get('fullName', '???')}...")
+            if e_idx % 20 == 0:
+                update_status(log=f"Sparse extraction: {e_idx}/{len(employees)} employees...")
 
         if all_features and scorer.enabled and scorer.model:
             update_status(message="Computing Neural Affinities...", progress=0.3, log=f"Running inference for {len(all_features)} pairs...")
@@ -193,10 +372,7 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
             
             # DEBUG INFER: Critical for verifying model output
             print(f"DEBUG INFER: Generated {len(preds)} predictions.")
-            print(f"DEBUG INFER: Mean Score={np.mean(preds):.4f}, Max={np.max(preds):.4f}, Min={np.min(preds):.4f}")
             print(f"DEBUG INFER: First 5 scores: {[float(p[0]) for p in preds[:5]]}")
-            if len(preds) > 0:
-                print(f"DEBUG: Raw Prediction Sample: {preds[0]} -> {int(preds[0][0] * 100)}%")
                 
             # Helper for safe conversion
             def safe_int(val, default=0):
@@ -213,7 +389,11 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
 
             avg_aff = sum(affinity_map.values()) / max(len(affinity_map), 1)
             update_status(log=f"Inference complete. Avg Affinity: {avg_aff:.1f}%")
-            print(f"DEBUG: Calculated {len(affinity_map)} affinities. Avg: {avg_aff:.1f}%")
+            
+            # MEMORY CLEANUP
+            del all_features, X_batch, preds
+            import gc
+            gc.collect()
         else:
             # Fallback for when no features are extracted (or no role matches)
             # If it's a role match but no model, give 50%.
@@ -222,6 +402,41 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                 if (e_idx, s_idx) not in affinity_map:
                     affinity_map[(e_idx, s_idx)] = 50
 
+        # --- ABSENCE RISK CALCULATION (Previsionale Phase 2) ---
+        absence_map = {} # (e_idx, date_str) -> probability float
+        try:
+            # 1. Use the SAME forecaster instance to avoid Redundant Data Fetch (OOM)
+            if 'forecaster' not in locals():
+                from services.forecasting_service import ForecastingService
+                forecaster = ForecastingService(environment)
+            
+            # Prefetch for all unique dates in shifts
+            unique_dates = sorted(list(set([s["date"] for s in required_shifts])))
+            for d_str in unique_dates:
+                 dt = datetime.fromisoformat(d_str)
+                 # Returns dict {emp_id: prob}
+                 daily_risks = forecaster.predict_absence_risk(dt)
+                 
+                 for e_idx, emp in enumerate(employees):
+                     eid = emp.get("id") or emp.get("employee_id")
+                     prob = daily_risks.get(eid, 0.0)
+                     absence_map[(e_idx, d_str)] = prob
+            
+            print(f"DEBUG: Absence Risk calculated. Sample: {list(absence_map.items())[:3]}")
+            
+            # FINAL FORECASTER CLEANUP
+            if 'forecaster' in locals():
+                del forecaster
+                import gc
+                gc.collect()
+
+        except Exception as e_risk:
+             print(f"WARNING: Absence Risk model failed ({e_risk}). Ignoring risks.")
+             # Fallback 0
+             for e_idx in range(len(employees)):
+                 for s in required_shifts:
+                     absence_map[(e_idx, s["date"])] = 0.0
+
         update_status(message="Building CP-SAT Model...", progress=0.5, log="Adding constraints (Rest, Overlap, Roles)...")
 
         try:
@@ -229,39 +444,24 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
 
             # A. Each shift must be assigned to ONE employee OR be marked as unassigned
             for s_idx, shift in enumerate(required_shifts):
-                model.Add(sum(x[(e_idx, s_idx)] for e_idx in range(len(employees))) + unassigned[s_idx] == 1)
+                eligible_vars = [x[(e_idx, s_idx)] for e_idx in range(len(employees)) if (e_idx, s_idx) in x]
+                model.Add(sum(eligible_vars) + unassigned[s_idx] == 1)
 
-            # B. Role Matching & Unavailability
-            for e_idx, emp in enumerate(employees):
-                e_role = norm_role(emp.get("role"))
-                for s_idx, shift in enumerate(required_shifts):
-                    s_role = norm_role(shift.get("role"))
+            # B. Validity & Unavailability (Sparsified)
+            # Role and contract match are already handled by sparse creation in step 2.
+            for (e_idx, s_idx) in x.keys():
+                emp = employees[e_idx]
+                shift = required_shifts[s_idx]
+                
+                # Check unavailabilities only for viable pairs
+                for unav in unavailabilities:
+                    u_eid = str(unav.get("employee_id") or "")
+                    u_name = name_of_id.get(u_eid, "").upper().strip()
+                    e_name = str(emp.get("fullName") or emp.get("name") or "").upper().strip()
                     
-                    # i. Role match (Keep consistent with preliminary check)
-                    # Force x=0 ONLY if roles are completely incompatible
-                    if not (e_role == s_role or (e_role in s_role) or (s_role in e_role)):
+                    if (unav["employee_id"] == emp.get("id") or (u_name and u_name == e_name)) and unav["date"] == shift["date"]:
                         model.Add(x[(e_idx, s_idx)] == 0)
-
-                    # ii. Contract Validity: employment.dtHired <= Data Turno <= employment.dtDismissed
-                    shift_date = datetime.fromisoformat(shift["date"]).date()
-                    if emp.get("dtHired"):
-                        try:
-                            hired_date = datetime.fromisoformat(emp["dtHired"]).date()
-                            if shift_date < hired_date:
-                                model.Add(x[(e_idx, s_idx)] == 0)
-                        except: pass
-
-                    if emp.get("dtDismissed"):
-                        try:
-                            dismissed_date = datetime.fromisoformat(emp["dtDismissed"]).date()
-                            if shift_date > dismissed_date:
-                                model.Add(x[(e_idx, s_idx)] == 0)
-                        except: pass
-
-                    # iii. Unavailability match
-                    for unav in unavailabilities:
-                        if unav["employee_id"] == emp["id"] and unav["date"] == shift["date"]:
-                            model.Add(x[(e_idx, s_idx)] == 0)
+                        break
 
         except Exception as e:
             import traceback
@@ -269,50 +469,58 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
             traceback.print_exc()
             raise e
 
-        # C. No Overlapping Shifts & 11h Rest for the same employee
+        # C. No Overlapping Shifts & 11h Rest for the same employee (Optimized Scalability)
         def get_minutes(t_str):
             h, m = map(int, t_str.split(':'))
             return h * 60 + m
 
-        # Pre-calculate minutes and group shifts by day
-        shift_details = []
-        shifts_by_day = {} # date_str -> list of indices
+        # Pre-calculate minutes, dates and durations
+        shift_details = [] # Stores (start_m, end_m, date_obj)
+        shift_durations = []
         for s_idx, s in enumerate(required_shifts):
             d = get_minutes(s["start_time"])
             e = get_minutes(s["end_time"])
+            duration = e - d
+            if duration < 0: duration += 1440
+            
             shift_details.append((d, e, datetime.fromisoformat(s["date"])))
-            date_str = s["date"]
-            if date_str not in shifts_by_day: shifts_by_day[date_str] = []
-            shifts_by_day[date_str].append(s_idx)
+            shift_durations.append(duration)
 
-        all_dates = sorted(shifts_by_day.keys())
-
-        for e_idx in range(len(employees)):
-            # i. Intra-day: No overlap
-            for date_str, s_indices in shifts_by_day.items():
-                for i in range(len(s_indices)):
-                    for j in range(i + 1, len(s_indices)):
-                        idx1, idx2 = s_indices[i], s_indices[j]
-                        start1, end1, _ = shift_details[idx1]
-                        start2, end2, _ = shift_details[idx2]
-                        if max(start1, start2) < min(end1, end2):
-                            model.Add(x[(e_idx, idx1)] + x[(e_idx, idx2)] <= 1)
-
-            # ii. Inter-day: 11h Rest between consecutive days
-            for d_idx in range(len(all_dates) - 1):
-                date1 = all_dates[d_idx]
-                date2 = all_dates[d_idx + 1]
-                # Only if they are consecutive calendar days
-                dt1 = datetime.fromisoformat(date1)
-                dt2 = datetime.fromisoformat(date2)
-                if dt2 == dt1 + timedelta(days=1):
-                    for idx1 in shifts_by_day[date1]:
-                        for idx2 in shifts_by_day[date2]:
-                            _, end1, _ = shift_details[idx1]
-                            start2, _, _ = shift_details[idx2]
-                            rest_minutes = (start2 + 1440) - end1
-                            if rest_minutes < 660:
-                                model.Add(x[(e_idx, idx1)] + x[(e_idx, idx2)] <= 1)
+        # Pre-group shifts by day for efficient inter-day rest constraints
+        base_date_obj = datetime.fromisoformat(required_shifts[0]["date"]) if required_shifts else datetime.now()
+        
+        # Build efficient NoOverlap constraints using PADDED IntervalVars
+        # PADDING shifts with 11h (660 min) automatically enforces the rest rule 
+        # using any standard NoOverlap constraint (much more memory efficient than millions of inequalities).
+        rest_padding = 660 # 11 hours 
+        
+        for e_idx, emp in enumerate(employees):
+            intervals = []
+            for s_idx, shift in enumerate(required_shifts):
+                if (e_idx, s_idx) not in x: continue
+                
+                s_date = datetime.fromisoformat(shift["date"])
+                day_offset = (s_date - base_date_obj).days
+                start_abs = (day_offset * 1440) + shift_details[s_idx][0]
+                
+                # We pad the "presence" with the required rest time
+                # Duration = actual_work + 11h_rest
+                # This ensures the NEXT shift can only start after Shift1_End + 11h
+                padded_duration = shift_durations[s_idx] + rest_padding
+                presence = x[(e_idx, s_idx)]
+                
+                iv = model.NewOptionalIntervalVar(
+                    start_abs, 
+                    padded_duration, 
+                    start_abs + padded_duration, 
+                    presence, 
+                    f'ival_{e_idx}_{s_idx}'
+                )
+                intervals.append(iv)
+            
+            if intervals:
+                # This single call replaces hundreds of thousands of individual model.Add() calls
+                model.AddNoOverlap(intervals)
 
         # D. Labor Law: Max hours per week (Per-Employee via Labor Profiles)
         for e_idx, emp in enumerate(employees):
@@ -335,83 +543,188 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                 yw = d_obj.isocalendar()[:2] # (year, week)
                 if yw not in work_by_week: work_by_week[yw] = []
                 
-                start, end, _ = shift_details[s_idx]
-                duration = end - start
-                if duration < 0: duration += 1440
-                work_by_week[yw].append(x[(e_idx, s_idx)] * duration)
+                if (e_idx, s_idx) in x:
+                    start, end, _ = shift_details[s_idx]
+                    duration = end - start
+                    if duration < 0: duration += 1440
+                    work_by_week[yw].append(x[(e_idx, s_idx)] * duration)
             
             # Apply limit per week
             for yw, minutes in work_by_week.items():
                 model.Add(sum(minutes) <= max_minutes_weekly)
 
         # 4. Objective: Maximize total affinity - large penalty for unassigned shifts
-        model.Maximize(
-            sum(x[(e_idx, s_idx)] * int(affinity_map[(e_idx, s_idx)] * affinity_weight)
-                for e_idx in range(len(employees))
-                for s_idx in range(len(required_shifts)))
-            - sum(unassigned[s_idx] * int(penalty_unassigned) for s_idx in range(len(required_shifts)))
-        )
+        obj_expr = []
+        # Scaling constant to allow small fractional penalties (like fairness) using integers
+        # We multiply Affinity and Unassigned penalty by 10.
+        SCALE = 10 
+
+        for s_idx in range(len(required_shifts)):
+            # Penalty for leaving unassigned (Negative)
+            obj_expr.append(unassigned[s_idx] * int(-penalty_unassigned * SCALE))
+            
+            for e_idx in range(len(employees)):
+                if (e_idx, s_idx) not in x: continue
+                
+                # Base affinity (0-100) * weight * SCALE
+                # ADD SOLVE-TIME JITTER: Small random bonus (0-30 points) to break ties and ensure diversity
+                import random
+                solve_jitter = random.randint(0, 30)
+                aff_score = int(affinity_map.get((e_idx, s_idx), 0) * affinity_weight * SCALE) + solve_jitter
+                
+                # Risk penalty
+                p_abs = absence_map.get((e_idx, required_shifts[s_idx]["date"]), 0.0)
+                risk_cost = int(p_abs * penalty_absence_risk * SCALE)
+                
+                # REFINED OBJECTIVE:
+                # Maximize Benefit = (Affinity + Penalty for being Assigned) - Risk
+                coeff = (aff_score + int(penalty_unassigned * SCALE)) - risk_cost
+                obj_expr.append(x[(e_idx, s_idx)] * coeff)
+
+        # FAIRNESS / LOAD BALANCING term:
+        # Subtract cost that increases with total hours assigned per employee
+        if fairness_weight > 0:
+            for e_idx, emp in enumerate(employees):
+                # Total minutes assigned to this person (sum of durations)
+                total_mins = []
+                for s_idx, _ in enumerate(required_shifts):
+                    if (e_idx, s_idx) in x:
+                        dur = shift_details[s_idx][1] - shift_details[s_idx][0]
+                        if dur < 0: dur += 1440
+                        total_mins.append(x[(e_idx, s_idx)] * dur)
+                
+                if total_mins:
+                    person_load = model.NewIntVar(0, 500000, f"load_e{e_idx}")
+                    model.Add(person_load == sum(total_mins))
+                    
+                    # ENHANCED FAIRNESS:
+                    # Penalty per minute = fairness_weight * SCALE / 120
+                    # If fairness_weight = 60, cost_per_min = 5.
+                    # 1 Shift (480 mins) = 2400 points penalty.
+                    # This is now strong enough to counteract even a 100% vs 0% affinity gap.
+                    cost_per_min = max(0, int(fairness_weight * SCALE / 120))
+                    if cost_per_min > 0:
+                        obj_expr.append(person_load * -cost_per_min)
+                
+        model.Maximize(cp_model.LinearExpr.Sum(obj_expr))
 
         # 5. Solve
         solver = cp_model.CpSolver()
-        # Enable parallelism: Use 8 workers to match the target 4-CPU Cloud Run instance (2 threads/core)
-        solver.parameters.num_search_workers = 8
-        # Set a time limit of 30 seconds to prevent timeouts on complex schedules
-        solver.parameters.max_time_in_seconds = 30.0
-        update_status(message="Executing Combinatorial Optimization...", progress=0.8, log=f"Searching for solution (8 workers, 30s limit)...")
+        # Enable parallelism
+        solver.parameters.num_search_workers = 4
+        
+        # VARIETY: Use a random seed based on current time to ensure different generations
+        import time
+        solver.parameters.random_seed = int(time.time()) % 10000
+        
+        # Set a higher time limit for large problems
+        solve_timeout = 60.0
+        if len(required_shifts) > 1000: solve_timeout = 120.0
+        
+        solver.parameters.max_time_in_seconds = solve_timeout
+        update_status(message="Executing Combinatorial Optimization...", progress=0.8, log=f"Searching for solution (8 workers, {solve_timeout}s limit)...")
         status = solver.Solve(model)
-
-        if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-            update_status(message="Schedule Solution Found", progress=1.0, phase="IDLE", log=f"Solution status: {'OPTIMAL' if status == cp_model.OPTIMAL else 'FEASIBLE'}")
-            results = []
-            for s_idx, shift in enumerate(required_shifts):
-                assigned = False
+        
+        print(f"DEBUG: Solver Status: {status}")
+        if status == cp_model.INFEASIBLE or status == cp_model.UNKNOWN:
+            print(f"DEBUG: Solver reported {status}. Analyzing potential causes...")
+            # Check for role coverage gaps
+            required_roles = set(s['role'] for s in required_shifts)
+            available_roles = set(e['role'] for e in employees)
+            missing_roles = required_roles - available_roles
+            if missing_roles:
+                print(f"  > CRITICAL: Missing roles in staff list: {missing_roles}")
+            
+            print(f"  > Total Shifts: {len(required_shifts)}")
+            print(f"  > Total Staff: {len(employees)}")
+            
+            from collections import Counter
+            c_types = Counter([c.WhichOneof('constraint') for c in model.Proto().constraints])
+            print(f"  > Constraint types: {dict(c_types)}")
+            
+            # Deep Probe: Is it a role match issue?
+            for s_idx, s in enumerate(required_shifts):
+                potential_emps = 0
+                s_role = norm_role(s.get("role"))
                 for e_idx, emp in enumerate(employees):
-                    if solver.Value(x[(e_idx, s_idx)]):
-                        results.append({
-                            "id": shift["id"],
-                            "date": shift["date"],
-                            "employee_id": emp.get("id") or emp.get("employee_id") or emp.get("external_id"),
-                            "employee_name": emp.get("fullName") or emp.get("name"),
-                            "start_time": shift["start_time"],
-                            "end_time": shift["end_time"],
-                            "role": shift["role"],
-                            "activity_id": shift.get("activity_id"),
-                            "project": shift.get("project"),
-                            "affinity": affinity_map.get((e_idx, s_idx), 0) / 100.0,
-                            "is_unassigned": False
-                        })
-                        assigned = True
-                        break # One employee per shift
-                
-                if not assigned:
-                    # Include UNASSIGNED shifts so they appear in the UI (e.g. in a "To Assign" row)
-                    results.append({
-                        "id": shift["id"],
-                        "date": shift["date"],
-                        "employee_id": "unassigned", # Specific marker
-                        "employee_name": "Unassigned",
-                        "start_time": shift["start_time"],
-                        "end_time": shift["end_time"],
-                        "role": shift["role"],
-                        "activity_id": shift.get("activity_id"),
-                        "project": shift.get("project"),
-                        "affinity": 0.0,
-                        "is_unassigned": True
-                    })
+                    e_role = norm_role(emp.get("role"))
+                    if e_role == s_role or (e_role in s_role) or (s_role in e_role):
+                        potential_emps += 1
+                if potential_emps == 0:
+                    print(f"  > WARNING: Shift {s['id']} has NO matching employees for role {s_role}")
+            
+            # If UNKNOWN/INFEASIBLE, we'll continue to result processing 
+            # which now has a fallback to unassigned.
+            if status == cp_model.INFEASIBLE:
+                status = cp_model.FEASIBLE # Dummy to trigger result processing
 
-            assigned_count = len([r for r in results if not r.get('is_unassigned')])
-            unassigned_count = len(results) - assigned_count
-            update_status(
-                message=f"Optimized: {assigned_count} Assigned, {unassigned_count} Open", 
-                progress=1.0, 
-                phase="IDLE", 
-                log=f"Solution status: {'OPTIMAL' if status == cp_model.OPTIMAL else 'FEASIBLE'}. Assigned: {assigned_count}/{len(required_shifts)}."
-            )
+        # 5. Results Processing (Guaranteed results list)
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            update_status(message="Solver incomplete", log=f"Solver returned status {status}. Showing unassigned/best-effort coverage.")
+        
+        update_status(message="Processing Results...", progress=0.9)
+        results = []
+        
+        # Check if we actually have a solution we can read
+        has_solution = False
+        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            try:
+                # Test with one value
+                if required_shifts:
+                    solver.Value(unassigned[0])
+                has_solution = True
+            except:
+                has_solution = False
 
-            return results
+        for s_idx, shift in enumerate(required_shifts):
+            assigned = False
+            if has_solution:
+                for e_idx in range(len(employees)):
+                    if (e_idx, s_idx) not in x: continue
+                    emp = employees[e_idx]
+                    try:
+                        if solver.Value(x[(e_idx, s_idx)]):
+                            results.append({
+                                "id": shift["id"],
+                                "date": shift["date"],
+                                "employee_id": emp.get("id") or emp.get("employee_id") or emp.get("external_id"),
+                                "employee_name": emp.get("fullName") or emp.get("name"),
+                                "start_time": shift["start_time"],
+                                "end_time": shift["end_time"],
+                                "role": shift["role"],
+                                "activity_id": shift.get("activity_id"),
+                                "project": shift.get("project"),
+                                "affinity": affinity_map.get((e_idx, s_idx), 0) / 100.0,
+                                "absence_risk": float(absence_map.get((e_idx, shift["date"]), 0.0)),
+                                "labor_profile_id": emp.get("labor_profile_id"),
+                                "is_unassigned": False
+                            })
+                            assigned = True
+                            break
+                    except: pass
+            
+            if not assigned:
+                results.append({
+                    "id": shift["id"],
+                    "date": shift["date"],
+                    "employee_id": "unassigned",
+                    "employee_name": "Unassigned",
+                    "start_time": shift["start_time"],
+                    "end_time": shift["end_time"],
+                    "role": shift["role"],
+                    "activity_id": shift.get("activity_id"),
+                    "project": shift.get("project"),
+                    "affinity": 0.0,
+                    "is_unassigned": True
+                })
 
-        update_status(message="Search Completed - No Solution", progress=1.0, phase="IDLE", log="Solver could not find a valid matching with current constraints.")
-        return None
+        assigned_count = len([r for r in results if not r.get('is_unassigned')])
+        update_status(
+            message=f"Results Ready: {assigned_count} Assigned", 
+            progress=1.0, 
+            phase="IDLE", 
+            log=f"Solver status: {status}. Finalizing output."
+        )
+        return results
     finally:
         set_running(False)

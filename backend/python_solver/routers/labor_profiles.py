@@ -11,7 +11,7 @@ router = APIRouter(prefix="/labor-profiles", tags=["Labor Profiles"])
 @router.get("/{company_id}")
 def list_profiles(company_id: str, environment: str = Depends(verify_hmac)):
     """List all Labor Profiles for a specific company."""
-    client = get_db().client
+    client = get_db(namespace=company_id).client
     query = client.query(kind="LaborProfile")
     query.add_filter("company_id", "=", company_id)
     

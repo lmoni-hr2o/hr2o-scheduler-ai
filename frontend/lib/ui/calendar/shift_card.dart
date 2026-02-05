@@ -5,6 +5,7 @@ import '../../models/agent_models.dart';
 class ShiftCard extends StatelessWidget {
   final Map<String, dynamic> shift;
   final double? affinity;
+  final double? absenceRisk; // NEW
   final String? historicalTime;
   final List<Activity> activities;
 
@@ -12,6 +13,7 @@ class ShiftCard extends StatelessWidget {
     super.key, 
     required this.shift,
     this.affinity,
+    this.absenceRisk,
     this.historicalTime,
     required this.activities,
   });
@@ -329,6 +331,25 @@ class ShiftCard extends StatelessWidget {
                 ),
               ),
             ],
+            // NEW: Absence Risk Indicator
+            if (absenceRisk != null && absenceRisk! > 0.2) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, size: 10, color: Colors.orange),
+                  const SizedBox(width: 4),
+                  Text(
+                    "RISK: ${(absenceRisk! * 100).toInt()}%",
+                    style: const TextStyle(
+                      color: Colors.orange,
+                      fontSize: 8,
+                      fontWeight: FontWeight.bold,
+                      decoration: TextDecoration.none,
+                    ),
+                  )
+                ],
+              )
+            ]
           ],
         ),
       ),

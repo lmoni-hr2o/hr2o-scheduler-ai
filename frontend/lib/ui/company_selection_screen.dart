@@ -18,6 +18,7 @@ class _CompanySelectionScreenState extends State<CompanySelectionScreen> {
   List<Map<String, String>> _environments = [];
   List<Map<String, String>> _filteredEnvironments = [];
   bool _isLoading = true;
+  bool _isSyncing = false; // Added
   final TextEditingController _searchController = TextEditingController();
 
   @override
@@ -57,8 +58,24 @@ class _CompanySelectionScreenState extends State<CompanySelectionScreen> {
     });
   }
 
+
+
   void _selectCompany(Map<String, String> env) async {
+    if (_isSyncing) return;
+    
+    setState(() => _isSyncing = true);
     await SecurityUtils.setActiveEnvironment(env['id']!);
+    
+    // Auto-Sync for fluid UX
+    try {
+      if (mounted) {
+         // Use Repo to sync
+         await context.read<ScheduleRepository>().syncOriginalSource();
+      }
+    } catch (e) {
+      print("Auto-sync failed: $e");
+    }
+
     if (mounted) {
       context.read<ScheduleBloc>().add(LoadInitialData());
       Navigator.pushReplacement(
@@ -156,7 +173,26 @@ class _CompanySelectionScreenState extends State<CompanySelectionScreen> {
                       borderRadius: BorderRadius.circular(15),
                       border: Border.all(color: Colors.white.withOpacity(0.05)),
                     ),
-                    child: _isLoading
+                    child: _isSyncing
+                        ? const Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                CircularProgressIndicator(color: AppTheme.accent),
+                                SizedBox(height: 16),
+                                Text(
+                                  "Sincronizzazione dati in corso...", 
+                                  style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)
+                                ),
+                                SizedBox(height: 8),
+                                Text(
+                                  "Potrebbe richiedere fino a 30 secondi", 
+                                  style: TextStyle(color: Colors.white54, fontSize: 12)
+                                ),
+                              ],
+                            ),
+                          )
+                        : _isLoading
                         ? const Center(child: CircularProgressIndicator(color: AppTheme.aiGlow))
                         : _filteredEnvironments.isEmpty
                             ? const Center(child: Text("Nessuna azienda trovata", style: TextStyle(color: Colors.white38)))

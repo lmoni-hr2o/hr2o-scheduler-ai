@@ -64,10 +64,10 @@ class _DemandSettingsDialogState extends State<DemandSettingsDialog> {
             children: [
               Row(
                 children: [
-                  Icon(Icons.tune_rounded, color: AppTheme.primary, size: 24),
+                  Icon(Icons.auto_awesome_rounded, color: AppTheme.aiGlow, size: 24),
                   const SizedBox(width: 12),
                   Text(
-                    "Demand Constraints",
+                    "AI Scheduling",
                     style: TextStyle(
                       color: AppTheme.textPrimary,
                       fontSize: 20,
@@ -76,46 +76,39 @@ class _DemandSettingsDialogState extends State<DemandSettingsDialog> {
                   ),
                 ],
               ),
+              const SizedBox(height: 16),
+              Text(
+                "Manual demand constraints are no longer needed. The system now automatically learns and predicts workload from your history.",
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 13, height: 1.5),
+              ),
               const SizedBox(height: 24),
               
-              // Weekday Slider
-              _buildSliderParams(
-                "Weekday Target", 
-                "Minimum staff Mon-Fri", 
-                _weekdayTarget, 
-                (val) => setState(() => _weekdayTarget = val.toInt())
-              ),
-              
-              const SizedBox(height: 20),
-
-              // Weekend Slider
-              _buildSliderParams(
-                "Weekend Target", 
-                "Minimum staff Sat-Sun", 
-                _weekendTarget, 
-                (val) => setState(() => _weekendTarget = val.toInt())
-              ),
-
-              const SizedBox(height: 24),
-
-              // AI Toggle (Future)
+              // AI Toggle
               Container(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: AppTheme.aiGlow.withOpacity(0.05),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(16),
                   border: Border.all(color: AppTheme.aiGlow.withOpacity(0.2)),
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.auto_awesome, color: AppTheme.aiGlow, size: 20),
-                    const SizedBox(width: 12),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: AppTheme.aiGlow.withOpacity(0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(Icons.auto_awesome, color: AppTheme.aiGlow, size: 20),
+                    ),
+                    const SizedBox(width: 16),
                     const Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text("AI Auto-Pilot", style: TextStyle(color: AppTheme.aiGlow, fontWeight: FontWeight.bold, fontSize: 13)),
-                          Text("Learn from history", style: TextStyle(color: Colors.white54, fontSize: 11)),
+                          Text("AI Demand Forecast", style: TextStyle(color: AppTheme.aiGlow, fontWeight: FontWeight.bold, fontSize: 14)),
+                          SizedBox(height: 2),
+                          Text("Analyzing patterns in REAL-TIME", style: TextStyle(color: Colors.white54, fontSize: 11)),
                         ],
                       ),
                     ),
@@ -126,9 +119,6 @@ class _DemandSettingsDialogState extends State<DemandSettingsDialog> {
                         setState(() => _aiEnabled = val);
                         if (val) {
                           context.read<ScheduleBloc>().add(LearnDemand());
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text("AI is analyzing your history..."), duration: Duration(seconds: 1)),
-                          );
                         }
                       },
                     ),
@@ -139,30 +129,29 @@ class _DemandSettingsDialogState extends State<DemandSettingsDialog> {
               const SizedBox(height: 32),
 
               Row(
-                mainAxisAlignment: MainAxisAlignment.end,
+                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: Text("Cancel", style: TextStyle(color: AppTheme.textSecondary)),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.primary,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppTheme.primary,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        elevation: 0,
+                      ),
+                      onPressed: () {
+                        context.read<ScheduleBloc>().add(UpdateDemandConfig(
+                          DemandConfig(
+                            weekdayTarget: _weekdayTarget, // Keep internal but no longer shown
+                            weekendTarget: _weekendTarget,
+                            aiEnabled: _aiEnabled,
+                          )
+                        ));
+                        Navigator.pop(context);
+                      },
+                      child: const Text("CLOSE", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
                     ),
-                    onPressed: () {
-                      context.read<ScheduleBloc>().add(UpdateDemandConfig(
-                        DemandConfig(
-                          weekdayTarget: _weekdayTarget,
-                          weekendTarget: _weekendTarget,
-                          aiEnabled: _aiEnabled,
-                        )
-                      ));
-                      Navigator.pop(context);
-                    },
-                    child: const Text("Apply Changes", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                   ),
                 ],
               ),
@@ -170,46 +159,6 @@ class _DemandSettingsDialogState extends State<DemandSettingsDialog> {
           ),
         ),
       ),
-    );
-  }
-
-  Widget _buildSliderParams(String title, String subt, int value, Function(double) onChanged) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(title, style: TextStyle(color: AppTheme.textPrimary, fontWeight: FontWeight.w600, fontSize: 14)),
-                Text(subt, style: TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
-              ],
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(6)),
-              child: Text("$value", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-            ),
-          ],
-        ),
-        SliderTheme(
-          data: SliderThemeData(
-            activeTrackColor: AppTheme.primary,
-            inactiveTrackColor: Colors.white10,
-            thumbColor: Colors.white,
-            overlayColor: AppTheme.primary.withOpacity(0.2),
-          ),
-          child: Slider(
-            value: value.toDouble(),
-            min: 1,
-            max: 10,
-            divisions: 9,
-            onChanged: onChanged,
-          ),
-        ),
-      ],
     );
   }
 }

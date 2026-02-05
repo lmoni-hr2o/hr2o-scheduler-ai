@@ -19,6 +19,7 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
   List<dynamic> _aiSimulation = [];
   bool _isLoading = false;
   String? _loadingMessage;
+  int _autoNavAttempts = 0;
 
   @override
   void initState() {
@@ -42,6 +43,16 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
         _realHistory = history;
         _aiSimulation = [];
         _isLoading = false;
+
+        // Auto-Navigation: If no data found for current month, try finding previous months (Recursion limit 3)
+        if (history.isEmpty && _autoNavAttempts < 3) {
+           _autoNavAttempts++;
+           // Check previous month
+           print("No history for $_selectedMonth, checking previous...");
+           Future.delayed(Duration(milliseconds: 100), () => _changeMonth(-1));
+        } else {
+           _autoNavAttempts = 0; // Reset on success or limit reached
+        }
       });
     } catch (e) {
       if (mounted) {
@@ -123,13 +134,16 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
     return Scaffold(
       backgroundColor: AppTheme.background,
       appBar: AppBar(
-        title: const Text("ANALISI & CONFRONTO MIA"),
+        title: const Text("STORICO TURNI E PRESENZE"),
         actions: [
+          // AI Simulation removed as per user request to focus on History
+          /*
           IconButton(
             icon: const Icon(Icons.auto_awesome_motion_rounded, color: AppTheme.aiGlow),
             tooltip: "Simula Scenario Migliore",
             onPressed: _isLoading ? null : _runSimulation,
           ),
+          */
           IconButton(
             icon: const Icon(Icons.calendar_month_rounded),
             onPressed: () async {
@@ -385,9 +399,11 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
             Expanded(
               child: Row(
                 children: [
-                  Expanded(child: _buildDetailList("REALE", real, Colors.blueGrey)),
-                  const VerticalDivider(color: Colors.white10),
-                  Expanded(child: _buildDetailList("OTTIMIZZATO IA", ai, AppTheme.aiGlow)),
+                  Expanded(child: _buildDetailList("TURNI REALI", real, Colors.blueGrey)),
+                  if (ai.isNotEmpty) ...[
+                    const VerticalDivider(color: Colors.white10),
+                    Expanded(child: _buildDetailList("OTTIMIZZATO IA", ai, AppTheme.aiGlow)),
+                  ],
                 ],
               ),
             ),
@@ -420,6 +436,15 @@ class _ScheduleComparisonScreenState extends State<ScheduleComparisonScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(item['employee_name'] ?? "Sconosciuto", style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            const Icon(Icons.work_outline, size: 10, color: Colors.white54),
+                            const SizedBox(width: 4),
+                            Expanded(child: Text(item['activity_name'] ?? "Nessuna commessa", style: TextStyle(color: AppTheme.accent.withOpacity(0.8), fontSize: 10, fontStyle: FontStyle.italic), overflow: TextOverflow.ellipsis)),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
                         Text("${item['start_time']} - ${item['end_time']}", style: const TextStyle(color: Colors.white38, fontSize: 10)),
                       ],
                     ),

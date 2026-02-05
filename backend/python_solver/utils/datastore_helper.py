@@ -60,6 +60,14 @@ class DatastoreClient:
         """Proxy to native datastore.Client.put_multi"""
         return self.client.put_multi(*args, **kwargs)
 
+    def put(self, *args, **kwargs):
+        """Proxy to native datastore.Client.put"""
+        return self.client.put(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        """Proxy to native datastore.Client.delete"""
+        return self.client.delete(*args, **kwargs)
+
     def batch(self):
         """Returns a batch object for batched writes"""
         return DatastoreBatch(self.client)

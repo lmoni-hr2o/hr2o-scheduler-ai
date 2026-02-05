@@ -34,6 +34,8 @@ class Employment {
   final String fullName; // Person Name
   final String role;
   final int? contractHours;
+  final String? contractType;
+  final String? qualification;
   final bool hasHistory;
   final List<String> projectIds;
   final List<String> customerKeywords;
@@ -47,6 +49,8 @@ class Employment {
     required this.fullName,
     required this.role,
     this.contractHours,
+    this.contractType,
+    this.qualification,
     this.hasHistory = false,
     this.projectIds = const [],
     this.customerKeywords = const [],
@@ -66,6 +70,8 @@ class Employment {
       contractHours: json['contract_hours'] is int 
           ? json['contract_hours'] 
           : int.tryParse(json['contract_hours']?.toString() ?? ''),
+      contractType: json['contract_type'] as String?,
+      qualification: json['qualification'] as String?,
       hasHistory: json['has_history'] as bool? ?? false,
       projectIds: (json['project_ids'] as List?)?.map((e) => e.toString()).toList() ?? [],
       customerKeywords: (json['customer_keywords'] as List?)?.map((e) => e.toString()).toList() ?? [],
@@ -81,6 +87,8 @@ class Employment {
     'fullName': fullName,
     'role': role,
     'contract_hours': contractHours,
+    'contract_type': contractType,
+    'qualification': qualification,
     'has_history': hasHistory,
     'project_ids': projectIds,
     'customer_keywords': customerKeywords,
@@ -198,12 +206,22 @@ class DemandConfig {
   final int weekdayTarget;
   final int weekendTarget;
   final bool aiEnabled;
+  final double affinityWeight;
+  final int penaltyUnassigned;
+  final double maxHoursWeekly;
+  final int penaltyAbsenceRisk;
+  final double fairnessWeight;
   final Map<String, dynamic>? profile;
 
   const DemandConfig({
     this.weekdayTarget = 3,
     this.weekendTarget = 2,
     this.aiEnabled = true,
+    this.affinityWeight = 1.0,
+    this.penaltyUnassigned = 100,
+    this.maxHoursWeekly = 40.0,
+    this.penaltyAbsenceRisk = 200,
+    this.fairnessWeight = 50.0,
     this.profile,
   });
 
@@ -215,9 +233,14 @@ class DemandConfig {
     }
 
     return DemandConfig(
-      weekdayTarget: parseSafe(json['weekdayTarget'], 3),
-      weekendTarget: parseSafe(json['weekendTarget'], 2),
+      weekdayTarget: (json['weekdayTarget'] as num?)?.toInt() ?? 3,
+      weekendTarget: (json['weekendTarget'] as num?)?.toInt() ?? 2,
       aiEnabled: json['aiEnabled'] ?? true,
+      affinityWeight: (json['affinityWeight'] as num?)?.toDouble() ?? 1.0,
+      penaltyUnassigned: (json['penaltyUnassigned'] as num?)?.toInt() ?? 100,
+      maxHoursWeekly: (json['maxHoursWeekly'] as num?)?.toDouble() ?? 40.0,
+      penaltyAbsenceRisk: (json['penaltyAbsenceRisk'] as num?)?.toInt() ?? 200,
+      fairnessWeight: (json['fairnessWeight'] as num?)?.toDouble() ?? 50.0,
       profile: json['profile'] as Map<String, dynamic>?,
     );
   }
@@ -227,6 +250,11 @@ class DemandConfig {
       'weekdayTarget': weekdayTarget,
       'weekendTarget': weekendTarget,
       'aiEnabled': aiEnabled,
+      'affinityWeight': affinityWeight,
+      'penaltyUnassigned': penaltyUnassigned,
+      'maxHoursWeekly': maxHoursWeekly,
+      'penaltyAbsenceRisk': penaltyAbsenceRisk,
+      'fairnessWeight': fairnessWeight,
       if (profile != null) 'profile': profile,
     };
   }
@@ -235,12 +263,22 @@ class DemandConfig {
     int? weekdayTarget,
     int? weekendTarget,
     bool? aiEnabled,
+    double? affinityWeight,
+    int? penaltyUnassigned,
+    double? maxHoursWeekly,
+    int? penaltyAbsenceRisk,
+    double? fairnessWeight,
     Map<String, dynamic>? profile,
   }) {
     return DemandConfig(
       weekdayTarget: weekdayTarget ?? this.weekdayTarget,
       weekendTarget: weekendTarget ?? this.weekendTarget,
       aiEnabled: aiEnabled ?? this.aiEnabled,
+      affinityWeight: affinityWeight ?? this.affinityWeight,
+      penaltyUnassigned: penaltyUnassigned ?? this.penaltyUnassigned,
+      maxHoursWeekly: maxHoursWeekly ?? this.maxHoursWeekly,
+      penaltyAbsenceRisk: penaltyAbsenceRisk ?? this.penaltyAbsenceRisk,
+      fairnessWeight: fairnessWeight ?? this.fairnessWeight,
       profile: profile ?? this.profile,
     );
   }

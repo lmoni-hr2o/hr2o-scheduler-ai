@@ -23,9 +23,14 @@ def get_companies(environment: str = Depends(verify_hmac)):
         query = client.query(kind="Company")
         results = []
         for entity in query.fetch():
-            data = dict(entity)
-            data["id"] = entity.key.name
-            results.append(data)
+            # Show companies that either have historical data OR at least one active employee
+            has_hist = entity.get("has_history") is True
+            emp_count = entity.get("active_employees_count") or 0
+            
+            if has_hist or emp_count > 0:
+                data = dict(entity)
+                data["id"] = entity.key.name
+                results.append(data)
         return results
     except Exception as e:
         print(f"ERROR fetching companies: {e}")
@@ -74,31 +79,21 @@ def get_periods(
     Legacy logic for external fetch removed - we rely on /sync.
     """
     try:
-        # Note: Sync service might assume periods are transient or stored differently.
-        # If we store them in Datastore during Sync (we don't currently save all periods in full details 
-        # for history learning, only aggregates. But if the app needs them...)
-        # WARN: The sync.py strategy defined saving Company/Employment/Activity, but strictly speaking 
-        # it "Learns" from periods, it doesn't duplicate millions of period rows unless asked.
-        # For now, we return empty if not stored, or implement a direct passthrough if needed on demand.
-        # But user asked to "clean". If the UI relies on this for the calendar view, we need them.
-        # Let's assume we fetch from external if not in DB? 
-        # No, clean means clean. I'll leave the Datastore query logic. 
-        # Ideally, we should add period persistence to sync.py if the UI needs it.
-        # But for now, let's keep the query logic simple.
+        client = get_db(namespace=environment).client
+        query = client.query(kind="Period")
         
-        # NOTE: Sync.py currently DOES NOT save all periods. 
-        # If the frontend needs to view them, we might need to restore the external proxy?
-        # Or I add it to sync.py. 
-        # User said "update system with what variables you use".
-        # I'll stick to Datastore query. If empty, it's empty (requires full sync with period storage enabled).
+        # Datastore query filter
+        # Note: Datastore doesn't support complex range on different fields well 
+        # but we can filter by 'tmregister'
+        query.add_filter("tmregister", ">=", start_date.isoformat())
+        query.add_filter("tmregister", "<=", end_date.isoformat())
         
-        client = get_db().client # Namespace handling inside get_db is tricky with new logic
-        # We manually construct access
-        # Assuming periods are stored under 'Company' parent or root?
-        # Sync.py didn't implement Period storage yet (just Analysis).
-        # We'll leave this empty for now or restore the External Proxy if critical.
-        # Given "Clean code", removing the complex proxy is better.
-        return []
+        results = []
+        for entity in query.fetch():
+            data = dict(entity)
+            data["id"] = entity.key.name
+            results.append(Period(**data))
+        return results
     except Exception as e:
         print(f"DEBUG: Internal periods fetch failed: {e}")
         return []

@@ -154,13 +154,31 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
     }
   }
 
+  String _normalizeName(String? name) {
+    if (name == null || name.isEmpty) return "";
+    // Remove symbols, uppercase, split, sort, join to catch word swaps
+    final clean = name.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9\s]'), '');
+    final words = clean.trim().split(RegExp(r'\s+'))..sort();
+    return words.join(' ');
+  }
+
   void _onLoadInitialData(LoadInitialData event, Emitter<ScheduleState> emit) async {
     emit(ScheduleLoading(message: "Caricamento dati ambiente..."));
     _currentUnavailabilities = [];
     _currentEmployees = [];
     _currentActivities = [];
     try {
-      _currentEmployees = await repository.getEmployment();
+      final rawEmps = await repository.getEmployment();
+      
+      // Deduplicate by Name (Word-sorted Case-Insensitive)
+      final seenNames = <String>{};
+      _currentEmployees = rawEmps.where((e) {
+        final nameKey = _normalizeName(e.fullName);
+        if (nameKey.isEmpty || seenNames.contains(nameKey)) return false;
+        seenNames.add(nameKey);
+        return true;
+      }).toList();
+
       _currentActivities = await repository.getActivities();
       
       // Load current demand profile/learned pattern
@@ -207,7 +225,15 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
     try {
       // 0. Ensure we have employees loaded (critical!)
       if (_currentEmployees.isEmpty) {
-        _currentEmployees = await repository.getEmployment();
+        final rawEmps = await repository.getEmployment();
+        final seenNames = <String>{};
+        _currentEmployees = rawEmps.where((e) {
+          final nameKey = _normalizeName(e.fullName);
+          if (nameKey.isEmpty || seenNames.contains(nameKey)) return false;
+          seenNames.add(nameKey);
+          return true;
+        }).toList();
+
         _currentActivities = await repository.getActivities();
       }
       
@@ -255,6 +281,7 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
         employees: _currentEmployees,
         activities: _currentActivities,
         unavailabilities: _currentUnavailabilities,
+        constraints: _currentDemand.toJson(), // PASS AI Suggestion weights
       );
       
       // 4. Save to Firestore for persistence

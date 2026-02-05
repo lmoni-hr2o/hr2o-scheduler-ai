@@ -102,6 +102,11 @@ class Employment(BaseModel):
     dtHired: Optional[str] = None
     dtDismissed: Optional[str] = None
     
+    # Contract Details
+    contract_type: Optional[str] = None # e.g. "Full Time", "Part Time"
+    contract_hours: Optional[float] = None
+    qualification: Optional[str] = None
+    
     # System Flags
     has_history: bool = False
     labor_profile_id: Optional[str] = None
@@ -126,6 +131,8 @@ class AlgorithmConfig(BaseModel):
     penalty_unassigned: float = 100.0
     max_hours_weekly: float = 40.0
     min_rest_hours: float = 11.0
+    penalty_absence_risk: float = 200.0
+    fairness_weight: float = 50.0  # Weight for load balancing (fairness)
     enable_historical_comparison: bool = True
     last_updated: datetime = Field(default_factory=datetime.now)
 
