@@ -2,13 +2,21 @@ class Activity {
   final String id;
   final String name;
   final String? color;
-  final Map<String, dynamic>? project; // Project/customer info
+  final Map<String, dynamic>? project;
+  final List<dynamic>? dailySchedule;
+  final List<int>? weeklySchedule;
+  final double? hhSchedule;
+  final String? typeSchedule;
 
   Activity({
     required this.id,
     required this.name,
     this.color,
     this.project,
+    this.dailySchedule,
+    this.weeklySchedule,
+    this.hhSchedule,
+    this.typeSchedule,
   });
 
   factory Activity.fromJson(Map<String, dynamic> json) {
@@ -17,6 +25,10 @@ class Activity {
       name: json['name'] as String? ?? 'Unknown Activity',
       color: json['color'] as String?,
       project: json['project'] as Map<String, dynamic>?,
+      dailySchedule: json['dailySchedule'] as List<dynamic>?,
+      weeklySchedule: (json['weeklySchedule'] as List?)?.map((e) => e as int).toList(),
+      hhSchedule: (json['hhSchedule'] as num?)?.toDouble(),
+      typeSchedule: json['typeSchedule'] as String?,
     );
   }
 
@@ -25,6 +37,10 @@ class Activity {
     'name': name,
     if (color != null) 'color': color,
     if (project != null) 'project': project,
+    if (dailySchedule != null) 'dailySchedule': dailySchedule,
+    if (weeklySchedule != null) 'weeklySchedule': weeklySchedule,
+    if (hhSchedule != null) 'hhSchedule': hhSchedule,
+    if (typeSchedule != null) 'typeSchedule': typeSchedule,
   };
 }
 

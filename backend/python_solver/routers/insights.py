@@ -141,6 +141,9 @@ def build_planner_digest(schedule_data: List[Dict[str, Any]]) -> Dict[str, Any]:
         except: return 0.0
 
     df["hours"] = df.apply(calc_hours, axis=1)
+    
+    # DEBUG: Log payload sample
+    print(f"DEBUG Digest: Columns={df.columns.tolist()}, Rows={len(df)}")
 
     # Top Activities by Load
     act_load = df.groupby("activity_id")["hours"].sum().reset_index().sort_values("hours", ascending=False).head(10)
@@ -260,6 +263,9 @@ async def analyze_pre_check(request: PreCheckRequest):
         profile = get_demand_profile(request.environment)
         
         # 2. Run Deterministic Advisor Engine
+        act_ids_sample = [a.get("id") for a in request.activities[:5]]
+        print(f"DEBUG PreCheck: Env={request.environment}, Activities={len(request.activities)}, ProfileKeys={len(profile)}, SampleIDs={act_ids_sample}")
+        
         result = AdvisorEngine.analyze(
             environment=request.environment,
             employees=request.employees,

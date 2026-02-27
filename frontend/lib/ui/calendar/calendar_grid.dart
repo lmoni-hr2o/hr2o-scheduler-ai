@@ -75,7 +75,32 @@ class _CalendarGridState extends State<CalendarGrid> {
     }).toList();
     
     final unavailabilities = s.unavailabilities;
-    final List<dynamic> shifts = widget.scheduleData['schedule'] ?? [];
+    final List<dynamic> shifts = widget.scheduleData['schedule'] ?? widget.scheduleData['result'] ?? [];
+    
+    // Index activities for fast lookup
+    final Map<String, String> activityNameMap = {
+      for (var a in s.activities) a.id.toString(): a.name
+    };
+
+    // Performance Optimization: Pre-index shifts by (employeeId or name) + date
+    final Map<String, List<dynamic>> shiftCache = {};
+    for (var s in shifts) {
+      if (s['date'] == null) continue;
+      final String d = s['date'].toString();
+      final String? eid = s['employee_id']?.toString();
+      final String name = _normalizeName(s['employee_name']?.toString());
+      
+      if (eid != null && eid != "unassigned") {
+        shiftCache.putIfAbsent("${eid}_$d", () => []).add(s);
+      }
+      if (name.isNotEmpty) {
+        shiftCache.putIfAbsent("${name}_$d", () => []).add(s);
+      }
+    }
+
+    if (shifts.isNotEmpty && DateTime.now().second % 10 == 0) {
+       debugPrint("DIAGNOSTIC: CalendarGrid displaying ${shifts.length} shifts. Sample date: ${shifts.first['date']}");
+    }
 
     // Use passed startDate (aligned to Monday by parent)
     final DateTime weekStart = widget.startDate;
@@ -95,6 +120,7 @@ class _CalendarGridState extends State<CalendarGrid> {
                     painter: HeatmapPainter(
                       shifts: shifts,
                       config: s.demandConfig,
+                      weekStart: weekStart,
                     ),
                   ),
                 ),
@@ -135,7 +161,7 @@ class _CalendarGridState extends State<CalendarGrid> {
                       
                       if (activeEmployees.isNotEmpty)
                         for (var emp in activeEmployees)
-                          _buildEmployeeRow(emp, shifts, unavailabilities, s.employees, s, days, weekStart),
+                          _buildEmployeeRow(emp, shifts, unavailabilities, s.employees, s, days, weekStart, shiftCache),
                     ],
                   ),
                 ),
@@ -158,7 +184,7 @@ class _CalendarGridState extends State<CalendarGrid> {
     );
   }
 
-  Widget _buildEmployeeRow(Employment emp, List<dynamic> shifts, List unavailabilities, List<Employment> employees, ScheduleLoaded state, List<String> days, DateTime weekStart) {
+  Widget _buildEmployeeRow(Employment emp, List<dynamic> shifts, List unavailabilities, List<Employment> employees, ScheduleLoaded state, List<String> days, DateTime weekStart, Map<String, List<dynamic>> shiftCache) {
     return Container(
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.04))),
@@ -238,28 +264,22 @@ class _CalendarGridState extends State<CalendarGrid> {
                     final cellDate = weekStart.add(Duration(days: d));
                     final dateStr = cellDate.toIso8601String().split('T')[0];
                     final isUnavailable = unavailabilities.any((u) {
-                      final bool matchId = u['employee_id'] == emp.id;
+                      final bool matchId = u['employee_id']?.toString() == emp.id.toString();
                       // Fallback case: if unavailability was linked to an alternative ID, it might not match by ID 
                       // but we assume it follows the person's name or the provided employee reference matches.
                       return matchId && u['date'] == dateStr;
                     });
 
-                    final cellShifts = shifts.where((s) {
-                      try {
-                        if (s['date'] == null) return false;
-                        final shiftDate = DateTime.parse(s['date']);
-                        // Match by ID OR by Normalized Full Name for robust deduplication mapping
-                        final bool matchId = s['employee_id'] == emp.id;
-                        final String shiftName = _normalizeName(s['employee_name']?.toString());
-                        final String rowName = _normalizeName(emp.fullName);
-                        final bool matchName = shiftName.isNotEmpty && shiftName == rowName;
-                        
-                        return (matchId || matchName) && 
-                               shiftDate.year == cellDate.year && 
-                               shiftDate.month == cellDate.month && 
-                               shiftDate.day == cellDate.day;
-                      } catch (e) { return false; }
-                    }).toList();
+                    final cellShifts = <dynamic>[];
+                    // Fast lookup in cache
+                    final idKey = "${emp.id}_$dateStr";
+                    final nameKey = "${_normalizeName(emp.fullName)}_$dateStr";
+                    
+                    if (shiftCache.containsKey(idKey)) {
+                      cellShifts.addAll(shiftCache[idKey]!);
+                    } else if (shiftCache.containsKey(nameKey)) {
+                      cellShifts.addAll(shiftCache[nameKey]!);
+                    }
                     
                     final hasHistory = state.historicalSchedules.any((hp) {
                       final bool matchId = hp['employee_id'] == emp.id;
@@ -322,6 +342,7 @@ class _CalendarGridState extends State<CalendarGrid> {
                                             absenceRisk: s['absence_risk']?.toDouble(),
                                             historicalTime: histTime,
                                             activities: state.activities,
+                                            activityNameMap: activityNameMap, // Pass optimized map
                                           );
                                         }).toList(),
                                       )),
@@ -408,8 +429,9 @@ class _CalendarGridState extends State<CalendarGrid> {
 class HeatmapPainter extends CustomPainter {
   final List<dynamic> shifts;
   final DemandConfig config;
+  final DateTime weekStart; // NEW
 
-  HeatmapPainter({required this.shifts, required this.config});
+  HeatmapPainter({required this.shifts, required this.config, required this.weekStart});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -423,13 +445,13 @@ class HeatmapPainter extends CustomPainter {
       if (s['date'] == null) continue;
       try {
         final date = DateTime.parse(s['date']);
-        final dayIdx = date.weekday - 1;
-        if (dayIdx >= 0 && dayIdx < 7) {
-          shiftsPerDay[dayIdx] = (shiftsPerDay[dayIdx] ?? 0) + 1;
+        
+        // Match ONLY shifts in the visible week
+        final diff = date.difference(weekStart).inDays;
+        if (diff >= 0 && diff < 7) {
+          shiftsPerDay[diff] = (shiftsPerDay[diff] ?? 0) + 1;
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) { }
     }
 
     for (int i = 0; i < 7; i++) {
@@ -445,14 +467,14 @@ class HeatmapPainter extends CustomPainter {
       
       List<Color> gradientColors;
       
-      // Tolerance of +/- 1 (Strict would be != target)
-      if (count < target - 1) {
+      // Tolerance of +/- 2 (Previously 1) to avoid excessive red alerts on slight deviations
+      if (count < target - 2) {
         // Critical: Red (Understaffed)
         gradientColors = [
           AppTheme.danger.withOpacity(0.15),
           AppTheme.danger.withOpacity(0.05),
         ];
-      } else if (count > target + 1) {
+      } else if (count > target + 2) {
         // Excess: Indigo (Overstaffed)
         gradientColors = [
           AppTheme.primary.withOpacity(0.15),

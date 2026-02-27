@@ -6,6 +6,7 @@ from typing import List, Optional
 import traceback
 import json
 import datetime
+from utils.payload_handler import compress_payload, decompress_payload
 
 router = APIRouter(prefix="/worker", tags=["Worker"])
 
@@ -21,6 +22,14 @@ def solve_worker(payload: WorkerPayload):
     job_id = payload.job_id
     print(f"WORKER: Starting processing for Job ID: {job_id}")
 
+    import psutil, os
+    proc = psutil.Process(os.getpid())
+    def log_mem(label):
+        mem = proc.memory_info().rss / (1024 * 1024)
+        print(f"DIAGNOSTIC [Worker]: {label} | Memory: {mem:.1f} MB")
+
+    log_mem("Worker starting job")
+
     client = get_db().client
     key = client.key("AsyncJob", job_id)
     job = client.get(key)
@@ -32,45 +41,26 @@ def solve_worker(payload: WorkerPayload):
     # Update status to processing
     job["status"] = "processing"
     job["updated_at"] = datetime.datetime.utcnow()
-    client.put(job)
+    # client.put(job) # DISABLED: Read-only mode
 
     try:
-        # Extract payload
-        # The payload in Datastore is stored as a blob or large string usually, 
-        # but here we'll assume we stored it as structured properties or a JSON string.
-        # Let's assume we store the initial request as individual fields in the entity for now,
-        # or as a giant 'payload' string if it fits. Given Datastore limits (1MB), large requests might fail.
-        # Ideally, large payloads should be in Cloud Storage. 
-        # For simplicity in this migration, we'll assume we stored the components in the entity 
-        # or as a JSON string 'request_payload'.
-        
         req_data = {}
         if "request_payload" in job:
-             req_data = json.loads(job["request_payload"])
+             req_data = json.loads(decompress_payload(job["request_payload"]))
         else:
-            # Fallback for manual inspection/legacy
             req_data = job
 
-        # Reconstruct "GenerateRequest" like object
         employees = req_data.get("employees", [])
         activities = req_data.get("activities", [])
-        # Datastore fetch inside worker if needed? 
-        # The previous logic allowed "zero-overhead ingestion" where IDs were passed 
-        # and the server fetched details. We should support that.
-        
         environment = job.get("environment")
 
-        # Reuse the logic from schedule.py (approx)
         # 1. Fetch Employees if missing
         if not employees:
             print(f"WORKER: Pulling employees from Datastore for {environment}...")
-            # Limits in worker can be higher
             MAX_ITEMS_WORKER = 2000 
-            
             db_env = get_db(namespace=environment).client
             query = db_env.query(kind="Employment")
             employees = []
-            count = 0
             for entity in query.fetch(limit=MAX_ITEMS_WORKER):
                 emp = dict(entity)
                 emp["id"] = entity.key.name
@@ -88,7 +78,6 @@ def solve_worker(payload: WorkerPayload):
                      "dtHired": emp.get("dtHired"),
                      "dtDismissed": emp.get("dtDismissed")
                 })
-                count += 1
         
         # 2. Fetch Activities if missing
         if not activities:
@@ -103,83 +92,35 @@ def solve_worker(payload: WorkerPayload):
                 activities.append(act)
 
         # 3. Setup other data
-        required_shifts = []
-        for s in req_data.get("required_shifts", []):
-             required_shifts.append({
-                "id": s.get("id"),
-                "date": s.get("date"),
-                "start_time": s.get("start_time"),
-                "end_time": s.get("end_time"),
-                "role": s.get("role"),
-                "activity_id": s.get("activity_id"),
-                "project": s.get("project")
-            })
-
-        unavailabilities = [
-            {
-                "employee_id": u.get("employee_id"), 
-                "date": u.get("date"), 
-                "start_time": u.get("start_time"),
-                "end_time": u.get("end_time"),
-                "reason": u.get("reason", "Unavailability")
-            }
-            for u in req_data.get("unavailabilities", [])
-        ]
+        required_shifts = req_data.get("required_shifts", [])
+        unavailabilities = req_data.get("unavailabilities", [])
 
         # 4. SOLVE
-        # Note: 'solver.engine.solve_schedule' prints to stdout which goes to logs.
         print(f"WORKER: Solving for {len(employees)} employees, {len(required_shifts)} shifts.")
         
         result = solve_schedule(
-            employees, 
-            required_shifts,
-            unavailabilities,
-            req_data.get("constraints", {}), 
-            req_data.get("start_date"), 
-            req_data.get("end_date"),
+            employees=employees, 
+            required_shifts=required_shifts,
+            unavailabilities=unavailabilities,
+            constraints=req_data.get("constraints", {}), 
+            start_date_str=req_data.get("start_date"), 
+            end_date_str=req_data.get("end_date"),
             activities=activities,
             environment=environment
         )
 
-        # 5. Save Result
-        if result:
-            # Check size before saving. Datastore entities < 1MB.
-            # Large schedules must be gzipped or stored in a separate list of entities 
-            # or Cloud Storage.
-            # For this focused task, we try to save to Datastore 'result' property.
-            # If it fails, we panic. (Future optimization: Blob storage).
-            
-            result_json = json.dumps(result)
-            if len(result_json.encode('utf-8')) > 900000: # ~900KB safety
-                print("WORKER: Warning - Result too large for Datastore. Truncating/Compressing not implemented.")
-                # Fallback: Just save empty and maybe log error? 
-                # Or save to a separate kind 'ScheduleResult' linked by ID?
-                # We'll try to save it as a Blob (bytes) which allows larger sizes (actually 1MB still limit).
-                # Text property is 1500 bytes indexed, but unindexed/text is limited by entity size (1MB).
-                pass
-
-            # Update Job
-            # We exclude from index to allow larger strings
-            job.exclude_from_indexes.add("result")
-            job["result"] = result_json 
-            job["status"] = "completed"
-            job["updated_at"] = datetime.datetime.utcnow()
-            client.put(job)
-            print("WORKER: Job completed successfully.")
-
+        # 5. Result Handling (ReadOnly - just log)
+        if isinstance(result, list):
+            is_empty_run = len(result) == 0
+            if is_empty_run:
+                print("WORKER: Job finished - No demand found.")
+            else:
+                print(f"WORKER: Job finished successfully - {len(result)} shifts assigned.")
         else:
-             job["status"] = "failed"
-             job["error"] = "Infeasible or No Solution"
-             job["updated_at"] = datetime.datetime.utcnow()
-             client.put(job)
+             print("WORKER: Job finished - Infeasible or No Solution.")
 
     except Exception as e:
-        print(f"WORKER CRITICAL: {e}")
+        print(f"WORKER CRITICAL Error: {e}")
         traceback.print_exc()
-        job["status"] = "failed"
-        job["error"] = str(e)
-        job["traceback"] = traceback.format_exc()
-        job["updated_at"] = datetime.datetime.utcnow()
-        client.put(job)
     
     return {"status": "ok"}

@@ -1,5 +1,5 @@
 from typing import List, Optional, Any, Dict
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import datetime
 from enum import Enum
 
@@ -74,11 +74,6 @@ class Activity(BaseModel):
     def transform_id(cls, v: Any) -> str:
         return str(v)
 
-    @field_validator('id', mode='before')
-    @classmethod
-    def transform_id(cls, v: Any) -> str:
-        return str(v)
-
 class LaborProfile(BaseModel):
     id: Optional[str] = None
     name: str # e.g. "Part-Time 20h", "Full-Time Standard"
@@ -125,7 +120,26 @@ class Employment(BaseModel):
     @classmethod
     def transform_id(cls, v: Any) -> str:
         return str(v)
-
+        
+    @model_validator(mode='before')
+    @classmethod
+    def clean_strings(cls, data: dict) -> dict:
+        if isinstance(data, dict):
+            if not data.get("name"): data["name"] = "Unknown Company"
+            if not data.get("fullName"): data["fullName"] = "Unknown Employee"
+            if not data.get("role"): data["role"] = "worker"
+            if not data.get("environment"): data["environment"] = ""
+            
+            for k in ["name", "fullName", "role", "environment", "address", "city", "contract_type", "qualification", "labor_profile_id"]:
+                if data.get(k) is not None: data[k] = str(data[k])
+                
+            for k in ["dtHired", "dtDismissed", "bornDate"]:
+                if data.get(k) is not None:
+                    if hasattr(data[k], "isoformat"):
+                        data[k] = data[k].isoformat()
+                    else:
+                        data[k] = str(data[k])
+        return data
 class AgentRequest(BaseModel):
     environment: str
     timestamp: int

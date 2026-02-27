@@ -6,6 +6,7 @@ from google.cloud import datastore
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import os
+from utils.company_resolver import resolve_environment_to_id
 
 # Constant to replace firestore.SERVER_TIMESTAMP
 SERVER_TIMESTAMP = datetime.utcnow
@@ -15,11 +16,13 @@ class DatastoreClient:
     
     def __init__(self, namespace: Optional[str] = None):
         if namespace is not None:
-            self.namespace = namespace
+            resolved_ns = resolve_environment_to_id(namespace)
         else:
-            self.namespace = os.getenv("DATASTORE_NAMESPACE")
+            resolved_ns = resolve_environment_to_id(os.getenv("DATASTORE_NAMESPACE"))
+            
+        self.namespace = resolved_ns
         self.client = datastore.Client(namespace=self.namespace)
-        print(f"DEBUG: Initialized DatastoreClient with namespace: {self.namespace}")
+        print(f"DEBUG: Initialized DatastoreClient. Requested ns: {namespace}, Resolved to: {self.namespace}")
     
     def collection(self, collection_name: str):
         """Returns a CollectionReference-like object"""
@@ -46,6 +49,8 @@ class DatastoreClient:
 
     def key(self, *args, **kwargs):
         """Proxy to native datastore.Client.key"""
+        if 'namespace' in kwargs and kwargs['namespace'] is not None:
+            kwargs['namespace'] = resolve_environment_to_id(kwargs['namespace'])
         return self.client.key(*args, **kwargs)
 
     def get(self, *args, **kwargs):
@@ -54,6 +59,8 @@ class DatastoreClient:
 
     def query(self, *args, **kwargs):
         """Proxy to native datastore.Client.query"""
+        if 'namespace' in kwargs and kwargs['namespace'] is not None:
+            kwargs['namespace'] = resolve_environment_to_id(kwargs['namespace'])
         return self.client.query(*args, **kwargs)
 
     def put_multi(self, *args, **kwargs):

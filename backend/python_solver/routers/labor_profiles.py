@@ -55,9 +55,8 @@ def create_or_update_profile(profile: LaborProfile, environment: str = Depends(v
         "last_updated": datetime.now()
     })
     
-    client.put(entity)
-    
-    return {"status": "success", "profile_id": profile.id}
+    # client.put(entity)
+    return {"status": "success", "profile_id": profile.id, "message": "READ-ONLY: Write disabled"}
 
 @router.delete("/{profile_id}")
 def delete_profile(profile_id: str, environment: str = Depends(verify_hmac)):
@@ -73,8 +72,8 @@ def delete_profile(profile_id: str, environment: str = Depends(verify_hmac)):
     # TODO: Check if any employees are using this profile
     # For now, we allow deletion
     
-    client.delete(key)
-    return {"status": "success", "message": "Profile deleted"}
+    # client.delete(key)
+    return {"status": "success", "message": "READ-ONLY: Delete disabled"}
 
 @router.post("/{profile_id}/clone")
 def clone_profile(profile_id: str, target_company_id: str, new_name: str = None, environment: str = Depends(verify_hmac)):
@@ -130,8 +129,8 @@ def assign_profile(employee_id: str, profile_id: Optional[str], company_id: str,
     
     if not profile_id:
         # If profile_id is None/Empty, remove the assignment
-        client.delete(key)
-        return {"status": "success", "message": "Assignment removed"}
+        # client.delete(key)
+        return {"status": "success", "message": "READ-ONLY: Remove disabled"}
     
     from google.cloud import datastore
     entity = datastore.Entity(key=key)
@@ -142,6 +141,6 @@ def assign_profile(employee_id: str, profile_id: Optional[str], company_id: str,
         "last_updated": datetime.now()
     })
     
-    client.put(entity)
-    return {"status": "success", "message": "Profile assigned"}
+    # client.put(entity)
+    return {"status": "success", "message": "READ-ONLY: Assign disabled"}
 

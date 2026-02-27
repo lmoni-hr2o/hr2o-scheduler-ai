@@ -92,3 +92,6 @@ Namespace (e.g., "OVERCLEAN") = Your service company
   "mail": str
 }
 ```
+
+
+# gcloud run deploy timeplanner --source . --region europe-west3 --project hrtimeplace --allow-unauthenticated --quiet

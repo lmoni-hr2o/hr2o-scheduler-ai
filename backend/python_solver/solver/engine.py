@@ -8,7 +8,7 @@ def update_status(message=None, progress=None, phase=None, log=None, details=Non
     _upd(message=message, progress=progress, phase=phase, log=log, details=details)
 
 def normalize_name(name):
-    """Normalize names by sorting words to catch 'Luca Moni' vs 'Moni Luca'."""
+    """Normalize names by sorting words"""
     if not name: return ""
     import re
     # Remove special characters, multiple spaces, keep only alphanumeric words
@@ -24,6 +24,16 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
     Now uses ForecastingService (ML) for demand prediction and Absence Risk.
     """
     set_running(True)
+    
+    def safe_int(val, default=0):
+        try:
+            if val is None: return default
+            import numpy as np
+            if isinstance(val, (float, np.floating)):
+                if np.isnan(val) or np.isinf(val): return default
+            return int(val)
+        except: return default
+
     try:
         # --- DEDUPLICAZIONE OBBLIGATORIA (Nome e ID) ---
         # Evita lo scheduling doppio di persone fisiche con ID o nomi duplicati.
@@ -60,13 +70,13 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
         entity = client.get(key)
 
         affinity_weight = 1.0
-        penalty_unassigned = 100
-        fairness_weight = 50.0
+        penalty_unassigned = 500  # Increased from 100 to force coverage
+        fairness_weight = 80.0    # Increased from 50 to better balance load
         if entity:
             affinity_weight = entity.get("affinity_weight", 1.0)
-            penalty_unassigned = int(float(entity.get("penalty_unassigned", 100) or 100))
+            penalty_unassigned = int(float(entity.get("penalty_unassigned", 500) or 500))
             penalty_absence_risk = int(float(entity.get("penalty_absence_risk", 200) or 200))
-            fairness_weight = float(entity.get("fairness_weight", 50.0))
+            fairness_weight = float(entity.get("fairness_weight", 80.0))
             print(f"DEBUG: Stored config: aff={affinity_weight}, unassigned={penalty_unassigned}, fairness={fairness_weight}")
         else:
             penalty_absence_risk = 200 # Default default
@@ -75,8 +85,10 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
         if constraints:
             affinity_weight = constraints.get("affinity_weight", constraints.get("affinityWeight", affinity_weight))
             penalty_unassigned = constraints.get("penalty_unassigned", constraints.get("penaltyUnassigned", penalty_unassigned))
+            if penalty_unassigned < 500: penalty_unassigned = 500 # Floor to ensure coverage
             penalty_absence_risk = constraints.get("penalty_absence_risk", constraints.get("penaltyAbsenceRisk", penalty_absence_risk))
             fairness_weight = constraints.get("fairness_weight", constraints.get("fairnessWeight", fairness_weight))
+            if fairness_weight < 80.0: fairness_weight = 80.0 # Floor for better load balancing
             print(f"DEBUG: Dynamic overrides: aff={affinity_weight}, unassigned={penalty_unassigned}, fairness={fairness_weight}")
 
 
@@ -154,7 +166,16 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                 num_days = (end_dt - start_dt).days + 1
                 
                 forecaster = ForecastingService(environment)
-                predicted_demand = forecaster.predict_demand(start_dt, end_dt)
+                
+                # Filter to only activities requested in the payload to reduce memory/noise
+                active_activity_ids = [str(a.get("id")) for a in activities if a.get("id")]
+                predicted_demand = forecaster.predict_demand(start_dt, end_dt, activity_ids=active_activity_ids)
+                
+                # CAPACITY GUARD: If ML generates too many shifts, we must abort or sub-sample
+                # 5000 shifts is a reasonable limit for a synchronous solve with 4GB RAM
+                if len(predicted_demand) > 5000:
+                    print(f"WARNING: Too many ML predictions ({len(predicted_demand)}). Sub-sampling to 5000.")
+                    predicted_demand = predicted_demand[:5000]
                 
                 if predicted_demand:
                     print(f"DEBUG: Using ML Forecast with {len(predicted_demand)} predictions.")
@@ -227,6 +248,9 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                 print(f"WARNING: Forecasting fallito ({e_fore}), uso DemandProfiler come fallback.")
                 from utils.demand_profiler import get_demand_profile
                 profile = get_demand_profile(environment)
+                
+                # DIAGNOSTIC: How many activities have a profile?
+                print(f"DIAGNOSTIC: Profile found for {len(profile)} activities.")
     
                 unique_employee_roles = list(set([str(e.get("role") or "worker").strip().upper() for e in employees]))
                 if not unique_employee_roles:
@@ -236,8 +260,18 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                 end_dt = datetime.fromisoformat(end_date_str)
                 num_days = (end_dt - start_dt).days + 1
     
-                # We also need activities to match IDs from profile
-                # Use provided activities; only initialize if None
+                # FILTER: If we have a profile, we ONLY plan activities present in the profile.
+                # This prevents "Ghost" or "Inactive" activities from inflating the schedule.
+                if profile:
+                    relevant_activities = [a for a in (activities or []) if str(a.get("id")) in profile]
+                    if not relevant_activities and activities:
+                         # Fallback if profile exists but doesn't match current activity IDs (schema issue)
+                         print("WARNING: Profile exists but no activity ID match. Using filtered activity list.")
+                         relevant_activities = activities
+                    else:
+                         activities = relevant_activities
+                
+                print(f"DIAGNOSTIC: Planning for {len(activities or [])} filtered activities.")
                 if activities is None:
                     activities = []
                 
@@ -250,15 +284,46 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
     
                     # If we have a profile for this company, use it
                     if profile:
+                        # Prepare keys for hybrid matching
+                        active_ids = {str(a.get("id")) for a in activities if a.get("id")}
+                        active_codes = {str(a.get("code")).strip().upper() for a in activities if a.get("code")}
+                        active_names = {str(a.get("name")).strip().upper() for a in activities if a.get("name")}
+                        
                         for act_id, dow_patterns in profile.items():
+                            # Match check: If no activities requested, use all. Else filter.
+                            # We match if the profile key (act_id) matches any requested ID, Code or Name
+                            is_active = (not active_ids and not active_codes and not active_names) or \
+                                        (str(act_id) in active_ids) or \
+                                        (str(act_id).upper() in active_codes) or \
+                                        (str(act_id).upper() in active_names)
+                            
+                            if str(act_id).strip() == "816/2020 ORDINARIO":
+                                 print(f"DIAGNOSTIC TRACE [{date_str} DOW={dow}]: act_id={act_id} is_active={is_active}")
+                                 print(f"DIAGNOSTIC TRACE SETS: ids_len={len(active_ids)} ids={list(active_ids)[:5]} codes={list(active_codes)[:5]}")
+                            
+                            if not is_active:
+                                continue
+                                
                             if dow in dow_patterns:
-                                slots = dow_patterns[dow] # This is now a LIST of {start, end, qty}
+                                slots = dow_patterns[dow]
                                 if isinstance(slots, dict): slots = [slots] # Backward compatibility
     
                                 # Find activity info
                                 act_info = next((a for a in activities if str(a.get("id")) == str(act_id)), None)
     
                                 for p in slots:
+                                    # ENFORCE MINIMUM DURATION: 60 minutes (1 hour)
+                                    try:
+                                        h1, m1 = map(int, p["start_time"].split(':'))
+                                        h2, m2 = map(int, p["end_time"].split(':'))
+                                        dur = (h2 * 60 + m2) - (h1 * 60 + m1)
+                                        if dur < 0: dur += 1440
+                                        if dur < 60: 
+                                            # Skip shifts shorter than 1 hour to satisfy user constraint
+                                            continue
+                                    except:
+                                        pass
+
                                     qty = p.get("quantity", 1)
                                     for s_idx in range(qty):
                                         required_shifts.append({
@@ -347,7 +412,12 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                 s_role = norm_role(shift.get("role"))
                 
                 # Eligibility check (Role + Contract)
-                if not (e_role == s_role or (e_role in s_role) or (s_role in e_role)):
+                # WORKER is a wildcard: if either the employee or the shift has 'WORKER' role, they match.
+                # This ensures compatibility between generic staff and learned historical activities.
+                is_worker_match = (e_role == "WORKER" or s_role == "WORKER")
+                strict_match = (e_role == s_role or (e_role in s_role) or (s_role in e_role))
+                
+                if not (is_worker_match or strict_match):
                     continue
                 
                 shift_date = datetime.fromisoformat(shift["date"]).date()
@@ -374,14 +444,7 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
             print(f"DEBUG INFER: Generated {len(preds)} predictions.")
             print(f"DEBUG INFER: First 5 scores: {[float(p[0]) for p in preds[:5]]}")
                 
-            # Helper for safe conversion
-            def safe_int(val, default=0):
-                try:
-                    if val is None: return default
-                    if isinstance(val, (float, np.floating)):
-                        if np.isnan(val) or np.isinf(val): return default
-                    return int(val)
-                except: return default
+            # Inference complete
 
             for idx, (e_idx, s_idx) in enumerate(pairs):
                 aff = safe_int(preds[idx][0] * 100)
@@ -394,13 +457,14 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
             del all_features, X_batch, preds
             import gc
             gc.collect()
-        else:
-            # Fallback for when no features are extracted (or no role matches)
-            # If it's a role match but no model, give 50%.
-            # Actually pairs only contains role matches.
             for e_idx, s_idx in pairs:
                 if (e_idx, s_idx) not in affinity_map:
                     affinity_map[(e_idx, s_idx)] = 50
+            
+            print(f"DIAGNOSTIC: Pairs identified: {len(pairs)}, Affinity map size: {len(affinity_map)}")
+            if len(pairs) > 0:
+                e0, s0 = pairs[0]
+                print(f"DIAGNOSTIC Sample: EmpRole={norm_role(employees[e0].get('role'))}, ShiftRole={norm_role(required_shifts[s0].get('role'))}")
 
         # --- ABSENCE RISK CALCULATION (Previsionale Phase 2) ---
         absence_map = {} # (e_idx, date_str) -> probability float
@@ -438,6 +502,10 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                      absence_map[(e_idx, s["date"])] = 0.0
 
         update_status(message="Building CP-SAT Model...", progress=0.5, log="Adding constraints (Rest, Overlap, Roles)...")
+        
+        print(f"DIAGNOSTIC: Starting solver for {len(employees)} employees and {len(required_shifts)} shifts.")
+        if len(required_shifts) == 0:
+            print("DIAGNOSTIC WARNING: No required shifts were generated. This will cause an empty return.")
 
         try:
             # 3. Constraints
@@ -449,6 +517,7 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
 
             # B. Validity & Unavailability (Sparsified)
             # Role and contract match are already handled by sparse creation in step 2.
+            name_of_id = {str(emp.get("id") or emp.get("employee_id") or ""): str(emp.get("fullName") or emp.get("name") or "") for emp in employees}
             for (e_idx, s_idx) in x.keys():
                 emp = employees[e_idx]
                 shift = required_shifts[s_idx]
@@ -475,52 +544,69 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
             return h * 60 + m
 
         # Pre-calculate minutes, dates and durations
-        shift_details = [] # Stores (start_m, end_m, date_obj)
+        shift_details = [] # Stores (start_m, end_m, date_obj, abs_start, abs_end)
         shift_durations = []
+        base_date_obj = datetime.fromisoformat(required_shifts[0]["date"]) if required_shifts else datetime.now()
+
         for s_idx, s in enumerate(required_shifts):
             d = get_minutes(s["start_time"])
             e = get_minutes(s["end_time"])
             duration = e - d
             if duration < 0: duration += 1440
             
-            shift_details.append((d, e, datetime.fromisoformat(s["date"])))
+            s_date = datetime.fromisoformat(s["date"])
+            day_offset = (s_date - base_date_obj).days
+            abs_start = (day_offset * 1440) + d
+            abs_end = abs_start + duration
+            
+            shift_details.append((d, e, s_date, abs_start, abs_end))
             shift_durations.append(duration)
 
-        # Pre-group shifts by day for efficient inter-day rest constraints
-        base_date_obj = datetime.fromisoformat(required_shifts[0]["date"]) if required_shifts else datetime.now()
-        
-        # Build efficient NoOverlap constraints using PADDED IntervalVars
-        # PADDING shifts with 11h (660 min) automatically enforces the rest rule 
-        # using any standard NoOverlap constraint (much more memory efficient than millions of inequalities).
-        rest_padding = 660 # 11 hours 
-        
+        # 1. No Overlap (Immediate/Same Day)
+        # We use NoOverlap WITHOUT any padding to allow contiguous "project" shifts in the same day.
         for e_idx, emp in enumerate(employees):
             intervals = []
             for s_idx, shift in enumerate(required_shifts):
                 if (e_idx, s_idx) not in x: continue
                 
-                s_date = datetime.fromisoformat(shift["date"])
-                day_offset = (s_date - base_date_obj).days
-                start_abs = (day_offset * 1440) + shift_details[s_idx][0]
-                
-                # We pad the "presence" with the required rest time
-                # Duration = actual_work + 11h_rest
-                # This ensures the NEXT shift can only start after Shift1_End + 11h
-                padded_duration = shift_durations[s_idx] + rest_padding
                 presence = x[(e_idx, s_idx)]
-                
                 iv = model.NewOptionalIntervalVar(
-                    start_abs, 
-                    padded_duration, 
-                    start_abs + padded_duration, 
+                    shift_details[s_idx][3], 
+                    shift_durations[s_idx], 
+                    shift_details[s_idx][4], 
                     presence, 
-                    f'ival_{e_idx}_{s_idx}'
+                    f'ival_e{e_idx}_s{s_idx}'
                 )
                 intervals.append(iv)
             
             if intervals:
-                # This single call replaces hundreds of thousands of individual model.Add() calls
                 model.AddNoOverlap(intervals)
+
+        # 2. Inter-day Rest (11 hours = 660 mins)
+        # To avoid millions of constraints, we only compare shifts on consecutive or nearby days.
+        REST_PERIOD = 660 
+        
+        # Group shift indices by employee and then by day offset
+        emp_shifts_by_day = {e_idx: {} for e_idx in range(len(employees))}
+        for (e_idx, s_idx) in x.keys():
+            day_offset = (shift_details[s_idx][2] - base_date_obj).days
+            if day_offset not in emp_shifts_by_day[e_idx]:
+                emp_shifts_by_day[e_idx][day_offset] = []
+            emp_shifts_by_day[e_idx][day_offset].append(s_idx)
+
+        for e_idx, days_map in emp_shifts_by_day.items():
+            sorted_days = sorted(days_map.keys())
+            for i, d1 in enumerate(sorted_days):
+                # We need to check day d1 against subsequent days
+                # Usually checking the very next day d2 is enough if we assume people work daily.
+                # To be safe, we check up to d1 + 2
+                for j in range(i + 1, min(i + 3, len(sorted_days))):
+                    d2 = sorted_days[j]
+                    for s1_idx in days_map[d1]:
+                        for s2_idx in days_map[d2]:
+                            # If both s1 and s2 are assigned to e_idx, they must have 11h gap
+                            # Constraint: End(s1) + 660 <= Start(s2)
+                            model.Add(shift_details[s1_idx][4] + REST_PERIOD <= shift_details[s2_idx][3]).OnlyEnforceIf([x[(e_idx, s1_idx)], x[(e_idx, s2_idx)]])
 
         # D. Labor Law: Max hours per week (Per-Employee via Labor Profiles)
         for e_idx, emp in enumerate(employees):
@@ -544,17 +630,96 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                 if yw not in work_by_week: work_by_week[yw] = []
                 
                 if (e_idx, s_idx) in x:
-                    start, end, _ = shift_details[s_idx]
-                    duration = end - start
-                    if duration < 0: duration += 1440
+                    duration = shift_durations[s_idx]
                     work_by_week[yw].append(x[(e_idx, s_idx)] * duration)
             
             # Apply limit per week
             for yw, minutes in work_by_week.items():
                 model.Add(sum(minutes) <= max_minutes_weekly)
 
+        # E. MINIMUM DAILY PRESENCE (At least 1 hour of work if any is assigned)
+        # Prevents "15-minute shifts" for individual projects.
+        MIN_DAILY_MINUTES = 60 # 1 Hour
+        for e_idx in range(len(employees)):
+            for day_offset in emp_shifts_by_day[e_idx]:
+                day_s_indices = emp_shifts_by_day[e_idx][day_offset]
+                day_mins = [x[(e_idx, s_idx)] * shift_durations[s_idx] for s_idx in day_s_indices]
+                
+                # Indicator: 1 if employee works at all on this day
+                works_on_day = model.NewBoolVar(f"works_e{e_idx}_d{day_offset}")
+                model.Add(sum(x[(e_idx, s_idx)] for s_idx in day_s_indices) >= 1).OnlyEnforceIf(works_on_day)
+                model.Add(sum(x[(e_idx, s_idx)] for s_idx in day_s_indices) == 0).OnlyEnforceIf(works_on_day.Not())
+                
+                # If works_on_day is true, total minutes must be >= 120
+                model.Add(sum(day_mins) >= MIN_DAILY_MINUTES).OnlyEnforceIf(works_on_day)
+
         # 4. Objective: Maximize total affinity - large penalty for unassigned shifts
         obj_expr = []
+
+        # E. CONTIGUITY BONUS (To promote full "turni" and prevent fragmented "commesse")
+        # We reward assigning adjacent or very close project tasks to the same person.
+        CONTIGUITY_BONUS = 3000 # Massive bonus to glue projects together
+        CONTIGUITY_GAP_MAX = 30 # Allow up to 30 min gap (e.g. small break)
+        
+        for e_idx in range(len(employees)):
+            # Groups are already sorted by day
+            for day_offset in emp_shifts_by_day[e_idx]:
+                day_s_indices = emp_shifts_by_day[e_idx][day_offset]
+                for i in range(len(day_s_indices)):
+                    for j in range(len(day_s_indices)):
+                        if i == j: continue
+                        s1_idx = day_s_indices[i]
+                        s2_idx = day_s_indices[j]
+                        
+                        # Check if s1 completes and s2 starts within the allowed gap
+                        # s1.end <= s2.start <= s1.end + 30
+                        gap = shift_details[s2_idx][3] - shift_details[s1_idx][4]
+                        if 0 <= gap <= CONTIGUITY_GAP_MAX:
+                            is_together = model.NewBoolVar(f"tog_e{e_idx}_s{s1_idx}_s{s2_idx}")
+                            # Boolean AND: is_together is 1 ONLY IF both shifts are assigned to this employee
+                            # Since we MAXIMIZE, the solver will try to set it to 1 if allowed.
+                            model.Add(is_together <= x[(e_idx, s1_idx)])
+                            model.Add(is_together <= x[(e_idx, s2_idx)])
+                            obj_expr.append(is_together * CONTIGUITY_BONUS)
+
+        # F. FRAGMENTATION PREVENTION: Isolated short shifts are forbidden
+        # If a shift is < 120 mins, it MUST have at least one contiguous neighbor assigned to the same person.
+        for e_idx in range(len(employees)):
+            for day_offset in emp_shifts_by_day[e_idx]:
+                day_s_indices = emp_shifts_by_day[e_idx][day_offset]
+                for s_idx in day_s_indices:
+                    if shift_durations[s_idx] < 120:
+                        # Find potential neighbors for this person/day
+                        neighbors = []
+                        for other_idx in day_s_indices:
+                            if s_idx == other_idx: continue
+                            # Gap < 30 mins
+                            d1_start, d1_end = shift_details[s_idx][3], shift_details[s_idx][4]
+                            d2_start, d2_end = shift_details[other_idx][3], shift_details[other_idx][4]
+                            
+                            gap_forward = d2_start - d1_end
+                            gap_backward = d1_start - d2_end
+                            
+                            if (0 <= gap_forward <= CONTIGUITY_GAP_MAX) or (0 <= gap_backward <= CONTIGUITY_GAP_MAX):
+                                neighbors.append(x[(e_idx, other_idx)])
+                        
+                        if neighbors:
+                            # We use a PENALTY for isolated short shifts instead of a hard constraint
+                            # to avoid "Infeasible" or empty schedules if demand is fragmented.
+                            is_isolated = model.NewBoolVar(f"iso_e{e_idx}_s{s_idx}")
+                            # is_isolated is 1 if (is assigned AND no neighbors are assigned)
+                            # is_isolated implies assigned
+                            model.Add(is_isolated <= x[(e_idx, s_idx)])
+                            # if is_isolated, then sum(neighbors) must be 0
+                            model.Add(sum(neighbors) == 0).OnlyEnforceIf(is_isolated)
+                            
+                            # Extremely high penalty for being isolated
+                            obj_expr.append(is_isolated * -10000)
+                        else:
+                            # No neighbors possible on this day for this person
+                            # If they are assigned, it's a huge penalty
+                            obj_expr.append(x[(e_idx, s_idx)] * -10000)
+
         # Scaling constant to allow small fractional penalties (like fairness) using integers
         # We multiply Affinity and Unassigned penalty by 10.
         SCALE = 10 
@@ -589,8 +754,7 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                 total_mins = []
                 for s_idx, _ in enumerate(required_shifts):
                     if (e_idx, s_idx) in x:
-                        dur = shift_details[s_idx][1] - shift_details[s_idx][0]
-                        if dur < 0: dur += 1440
+                        dur = shift_durations[s_idx]
                         total_mins.append(x[(e_idx, s_idx)] * dur)
                 
                 if total_mins:
@@ -627,10 +791,17 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
         
         print(f"DEBUG: Solver Status: {status}")
         if status == cp_model.INFEASIBLE or status == cp_model.UNKNOWN:
-            print(f"DEBUG: Solver reported {status}. Analyzing potential causes...")
+            print(f"DIAGNOSTIC: Solver reported {status}. Analyzing potential causes...")
             # Check for role coverage gaps
-            required_roles = set(s['role'] for s in required_shifts)
-            available_roles = set(e['role'] for e in employees)
+            required_roles = set(norm_role(s['role']) for s in required_shifts)
+            available_roles = set(norm_role(e['role']) for e in employees)
+            print(f"DIAGNOSTIC roles: Required={required_roles}, Available={available_roles}")
+            
+            # Check if anyone can do these shifts
+            for s_idx, s in enumerate(required_shifts):
+                can_do = [e_idx for e_idx in range(len(employees)) if (e_idx, s_idx) in x]
+                if not can_do:
+                    print(f"DIAGNOSTIC SHIFT FAILURE: No one matched Shift {s_idx} ({s['role']})")
             missing_roles = required_roles - available_roles
             if missing_roles:
                 print(f"  > CRITICAL: Missing roles in staff list: {missing_roles}")
@@ -687,12 +858,12 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
                             results.append({
                                 "id": shift["id"],
                                 "date": shift["date"],
-                                "employee_id": emp.get("id") or emp.get("employee_id") or emp.get("external_id"),
+                                "employee_id": str(emp.get("id") or emp.get("employee_id") or emp.get("external_id")),
                                 "employee_name": emp.get("fullName") or emp.get("name"),
                                 "start_time": shift["start_time"],
                                 "end_time": shift["end_time"],
                                 "role": shift["role"],
-                                "activity_id": shift.get("activity_id"),
+                                "activity_id": str(shift.get("activity_id", "")),
                                 "project": shift.get("project"),
                                 "affinity": affinity_map.get((e_idx, s_idx), 0) / 100.0,
                                 "absence_risk": float(absence_map.get((e_idx, shift["date"]), 0.0)),

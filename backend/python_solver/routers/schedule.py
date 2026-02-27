@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException, Depends
-# from firebase_admin import firestore  # Replaced with Datastore
 from utils.datastore_helper import get_db
 from pydantic import BaseModel
 from typing import List, Optional
@@ -10,6 +9,7 @@ import uuid
 import datetime
 import json
 from utils.cloud_tasks import enqueue_task
+from utils.payload_handler import compress_payload, decompress_payload
 
 router = APIRouter(prefix="/schedule", tags=["Schedule"])
 
@@ -25,24 +25,10 @@ class Employee(BaseModel):
     labor_profile_id: Optional[str] = None
     fullName: Optional[str] = None
 
-class ShiftRequirement(BaseModel):
-    id: str
-    date: str # ISO string "YYYY-MM-DD"
-    start_time: str # "HH:mm"
-    end_time: str # "HH:mm"
-    role: str
-    project: Optional[dict] = None
-
-class Unavailability(BaseModel):
-    employee_id: str
-    date: str
-    start_time: Optional[str] = None # None means all day
-    end_time: Optional[str] = None
-
 class GenerateRequest(BaseModel):
     start_date: str
     end_date: str
-    employees: List[dict] # Bypassing Pydantic model for memory efficiency
+    employees: List[dict]
     required_shifts: Optional[List[dict]] = []
     unavailabilities: Optional[List[dict]] = []
     activities: Optional[List[dict]] = []
@@ -51,50 +37,131 @@ class GenerateRequest(BaseModel):
 @router.post("/generate")
 def generate_schedule(req: GenerateRequest, environment: str = Depends(verify_hmac)):
     """
-    Async generation: Saves request, enqueues Cloud Task, returns job_id.
+    Synchronous generation: Solves directly and returns results. No Datastore writes.
     """
     try:
-        job_id = str(uuid.uuid4())
-        print(f"DEBUG: Enqueuing Async Job {job_id} for env {environment}")
-
-        # 1. Save Request to Datastore
-        client = get_db().client
-        key = client.key("AsyncJob", job_id)
-        job = {
-            "job_id": job_id,
-            "status": "queued",
-            "created_at": datetime.datetime.utcnow(),
-            "updated_at": datetime.datetime.utcnow(),
-            "environment": environment,
-            # We store the raw request as a dict
-            "request_payload": json.dumps(req.dict()) 
-        }
-        entity = client.entity(key=key, exclude_from_indexes=["request_payload"])
-        entity.update(job)
-        client.put(entity)
-
-        # 2. Enqueue Task
-        # Payload for worker just needs ID
-        task_name = enqueue_task("/worker/solve", {"job_id": job_id})
+        print(f"DEBUG: Starting Synchronous Solve for env {environment}")
         
-        # 3. Return Job ID
+        # Call solver directly in the request (Stateless)
+        results = solve_schedule(
+            environment=environment,
+            start_date_str=req.start_date,
+            end_date_str=req.end_date,
+            employees=req.employees,
+            required_shifts=req.required_shifts,
+            unavailabilities=req.unavailabilities,
+            activities=req.activities,
+            constraints=req.constraints
+        )
+        
         return {
-            "status": "queued",
-            "job_id": job_id,
-            "task_name": task_name,
-            "message": "Schedule generation started in background."
+            "status": "completed",
+            "job_id": str(uuid.uuid4()),
+            "schedule": results,
+            "message": "Schedule generated successfully (Synchronous/ReadOnly)."
         }
 
     except Exception as e:
         import traceback
-        print(f"CRITICAL: Error enqueuing job: {e}")
+        print(f"CRITICAL: Error during solve: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/historical")
+def get_historical_schedule(
+    start_date: str, 
+    end_date: str, 
+    environment: str = Depends(verify_hmac)
+):
+    """
+    Fetches historical assignments (Periods) from Datastore.
+    Maps them to a simplified shift format for the frontend.
+    """
+    try:
+        from utils.date_utils import parse_date
+        sd = parse_date(start_date)
+        ed = parse_date(end_date)
+        
+        if not sd or not ed:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+
+        client = get_db(namespace=environment).client
+        query = client.query(kind="Period")
+        query.add_filter("tmregister", ">=", sd.isoformat())
+        query.add_filter("tmregister", "<=", ed.isoformat())
+        
+        results = []
+        for entity in query.fetch():
+            data = dict(entity)
+            # Map Datastore Period to UI Shift format
+            start_t = data.get("beginTimePlan") or data.get("tmregister")
+            end_t = data.get("endTimePlan") or data.get("endTimeCalc") or start_t
+            
+            if not start_t:
+                continue
+
+            # Robust time parsing
+            def format_time(t):
+                if isinstance(t, str):
+                    if "T" in t: return t.split("T")[1][:5]
+                    if ":" in t: return t[:5]
+                    return "08:00"
+                if hasattr(t, "strftime"):
+                    return t.strftime("%H:%M")
+                return "08:00"
+
+            def format_date(t):
+                if isinstance(t, str):
+                    if "T" in t: return t.split("T")[0]
+                    return t
+                if hasattr(t, "strftime"):
+                    return t.strftime("%Y-%m-%d")
+                return "2026-01-01"
+
+            s_str = format_time(start_t)
+            e_str = format_time(end_t)
+            d_str = format_date(start_t)
+
+            # Filter out shifts shorter than 60 minutes in historical view too
+            try:
+                h1, m1 = map(int, s_str.split(':'))
+                h2, m2 = map(int, e_str.split(':'))
+                dur = (h2 * 60 + m2) - (h1 * 60 + m1)
+                if dur < 0: dur += 1440
+                if dur < 60: continue # Skip very short tasks/commesse
+            except:
+                pass
+
+            # Extract activity info
+            act_data = data.get("activities") or {}
+            role = "worker"
+            if isinstance(act_data, dict):
+                role = act_data.get("name") or act_data.get("code") or "worker"
+            elif isinstance(act_data, list) and act_data:
+                role = act_data[0].get("name") or "worker"
+
+            results.append({
+                "id": entity.key.name or str(entity.key.id),
+                "employee_id": data.get("employmentId") or data.get("employee_id"),
+                "date": d_str,
+                "start_time": s_str,
+                "end_time": e_str,
+                "role": role,
+                "is_historical": True
+            })
+            
+        return results
+
+    except Exception as e:
+        print(f"ERROR fetching historical schedule: {e}")
+        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/job/{job_id}")
 def get_job_status(job_id: str):
     """
-    Polls the status of an async job.
+    Polls the status of an async job. (READ-ONLY Fallback)
     """
     try:
         client = get_db().client
@@ -102,7 +169,13 @@ def get_job_status(job_id: str):
         job = client.get(key)
 
         if not job:
-            raise HTTPException(status_code=404, detail="Job not found")
+            # If not found, maybe it was a sync job that finished instantly.
+            # Return "completed" with empty results as a fallback for frontend.
+            return {
+                "job_id": job_id,
+                "status": "completed",
+                "message": "Job handled synchronously (Read-Only Mode)."
+            }
         
         status = job.get("status", "unknown")
         
@@ -112,136 +185,13 @@ def get_job_status(job_id: str):
             "updated_at": str(job.get("updated_at"))
         }
 
-        if status == "completed":
-             # Parse result
-             import json
-             try:
-                 # Check if result is stored as string or blob
-                 res = job.get("result", "{}")
-                 if isinstance(res, bytes):
-                     res = res.decode('utf-8')
-                 response["schedule"] = json.loads(res)
-                 response["solver_status"] = "optimal" # Fallback/Assume
-             except Exception as e:
-                 print(f"Error parsing result: {e}")
-                 response["schedule"] = []
-                 response["error"] = "Failed to parse result"
-        
+        if status == "completed" and "result" in job:
+            response["schedule"] = decompress_payload(job["result"])
         elif status == "failed":
             response["error"] = job.get("error", "Unknown error")
-            response["traceback"] = job.get("traceback")
-
+            
         return response
 
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        print(f"Error fetching job {job_id}: {e}")
+        print(f"ERROR polling job {job_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/historical")
-def get_historical_schedule(start_date: str, end_date: str, environment: str = Depends(verify_hmac)):
-    """Fetches historical shift data (Period) for the given range and environment."""
-    # from utils.mapping_helper import mapper # Removed
-    from utils.date_utils import parse_date, format_date_iso
-    
-    # Direct Datastore Query
-    client = get_db(namespace=environment).client
-    raw_periods = []
-    try:
-        query = client.query(kind="Period")
-        # Optimization: Filter by date if possible, but Period structure varies.
-        # Ideally: .add_filter("tmregister", ">=", start_date)
-        # For now, fetch all (or limit) and filter updates to keep logic identical to legacy
-        # But for 'History' we probably want a limit
-        # raw_periods = list(query.fetch(limit=2000))
-        # Better: Filter by range if we can trust the 'tmregister' field is indexed
-        # Let's try basic fetch and filter in memory to be safe as per legacy behavior
-        for entity in query.fetch(limit=5000):
-            p = dict(entity)
-            p["_entity_id"] = entity.key.name
-            raw_periods.append(p)
-    except Exception as e:
-        print(f"Error querying periods: {e}")
-
-    
-    # Parse range dates
-    try:
-        range_start = parse_date(start_date)
-        range_end = parse_date(end_date)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid date format for filter")
-
-    historical_shifts = []
-    for p in raw_periods:
-        try:
-            # Dotted key lookup helper for flat-nested structures
-            def get_nested(obj, key_variants, default=None):
-                for kv in key_variants:
-                    # Try direct dotted lookup (flat)
-                    if kv in obj: return obj[kv]
-                    # Try nested lookup
-                    parts = kv.split('.')
-                    curr = obj
-                    for p_part in parts:
-                        if isinstance(curr, dict) and p_part in curr:
-                            curr = curr[p_part]
-                        else:
-                            curr = None
-                            break
-                    if curr is not None: return curr
-                return default
-
-            # Extract Register Date
-            tm_raw = get_nested(p, ["tmregister", "tmRegister", "beginTimePlace.tmregister", "date"])
-            reg_dt = parse_date(tm_raw)
-            
-            if reg_dt and range_start <= reg_dt <= range_end:
-                tmentry = get_nested(p, ["tmentry", "beginTimePlace.tmregister", "beginTimePlan"])
-                tmexit = get_nested(p, ["tmexit", "endTimePlace.tmregister", "endTimePlan"])
-                
-                def format_time(t):
-                    if hasattr(t, 'strftime'): return t.strftime("%H:%M")
-                    pts = parse_date(t)
-                    if pts: return pts.strftime("%H:%M")
-                    # Fallback string split
-                    ts = str(t).split('T')[-1].split(':')
-                    if len(ts) >= 2: return f"{ts[0]:02}:{ts[1]:02}"
-                    return "00:00"
-
-                # Employee ID and Name
-                emp_data = p.get("employment", {})
-                emp_id = get_nested(p, ["employment.id", "employmentId", "employee_id", "employment.code"])
-                if not emp_id and isinstance(emp_data, dict):
-                    emp_id = emp_data.get("id") or emp_data.get("code")
-
-                emp_name = get_nested(p, ["employment.person.fullName", "employee_name", "employment.fullName"], "Unknown Worker")
-                
-                # Activity Name
-                # Handle list of activities (common case) or dict
-                acts = p.get("activities")
-                if isinstance(acts, list) and len(acts) > 0:
-                    first_act = acts[0]
-                    # Try name, or project description, or code
-                    act_name = first_act.get("name") or first_act.get("project", {}).get("description") or first_act.get("code") or "Unknown Task"
-                elif isinstance(acts, dict):
-                     act_name = acts.get("name") or acts.get("project", {}).get("description") or "Unknown Task"
-                else:
-                    act_name = get_nested(p, ["activity_name", "activities.name"], "N/A")
-
-                historical_shifts.append({
-                    "id": str(p.get("_entity_id", "") or p.get("id", "") or "P" + str(len(historical_shifts))),
-                    "date": format_date_iso(reg_dt),
-                    "employee_id": str(emp_id),
-                    "employee_name": str(emp_name),
-                    "activity_name": str(act_name),
-                    "start_time": format_time(tmentry),
-                    "end_time": format_time(tmexit),
-                    "is_historical": True
-                })
-        except Exception as e:
-            print(f"DEBUG: Error processing historical period: {e}")
-            continue
-        
-    return historical_shifts

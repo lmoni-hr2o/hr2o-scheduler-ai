@@ -8,6 +8,7 @@ class ShiftCard extends StatelessWidget {
   final double? absenceRisk; // NEW
   final String? historicalTime;
   final List<Activity> activities;
+  final Map<String, String>? activityNameMap;
 
   const ShiftCard({
     super.key, 
@@ -16,6 +17,7 @@ class ShiftCard extends StatelessWidget {
     this.absenceRisk,
     this.historicalTime,
     required this.activities,
+    this.activityNameMap,
   });
 
   @override
@@ -26,8 +28,13 @@ class ShiftCard extends StatelessWidget {
     // Look up activity name
     String? activityName;
     if (shift['activity_id'] != null) {
-      final act = activities.where((a) => a.id == shift['activity_id']).firstOrNull;
-      activityName = act?.name;
+      final String targetId = shift['activity_id'].toString();
+      if (activityNameMap != null) {
+         activityName = activityNameMap![targetId];
+      } else {
+         final act = activities.where((a) => a.id.toString() == targetId).firstOrNull;
+         activityName = act?.name;
+      }
     }
 
     final displayLabel = activityName ?? 

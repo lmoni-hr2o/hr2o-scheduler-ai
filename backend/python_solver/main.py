@@ -40,22 +40,25 @@ async def log_requests(request: Request, call_next):
         print(f"DEBUG: Response status: {response.status_code} | Duration: {duration:.2f}s")
         return response
     except Exception as e:
+        import traceback
         print(f"CRITICAL: Middleware caught exception: {e}")
+        traceback.print_exc()
         from fastapi.responses import JSONResponse
-        response = JSONResponse(status_code=500, content={"detail": str(e)})
-        # Manually add CORS headers to error response to prevent 'Failed to fetch' in browser
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, PUT, DELETE"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        return response
+        # We return a response here. CORSMiddleware (added later/outer) will wrap this.
+        return JSONResponse(status_code=500, content={"detail": f"Internal Error: {str(e)}"})
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# Enable CORS - outermost layer (added last)
+# Enable CORS - mandatory outermost layer for browser security
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "https://hrtimeplace.web.app", 
+        "https://hrtimeplace.firebaseapp.com",
+        "http://localhost:8080", 
+        "http://localhost"
+    ],
+    allow_credentials=True, # Improved with explicit origins
     allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
     allow_headers=["*"],
     expose_headers=["*"],
@@ -74,6 +77,7 @@ app.include_router(worker.router)
 
 @app.on_event("startup")
 async def startup_event():
+    print("STARTUP: Running version V2-FIX-PROFILER-VERIFICATION")
     # RESET LOCK on startup: In case of previous crash, ensure we aren't blocked
     print("Startup: Clearing any stale locks...")
     try:

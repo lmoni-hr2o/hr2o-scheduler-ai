@@ -4,7 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class SecurityUtils {
   static const String _secretKey = "development-secret-key-12345";
-  static String activeEnvironment = ""; 
+  static String activeEnvironment = "lmoni-hr2o/hr2o-scheduler-ai";
 
   static Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();

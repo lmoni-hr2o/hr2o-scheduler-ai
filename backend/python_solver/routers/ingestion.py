@@ -90,10 +90,9 @@ async def import_data(payload: dict):
             
             batch.set(emp_ref, data, merge=True)
 
-        batch.commit()
-        
+        # batch.commit()
         return {
-            "message": "Import successful",
+            "message": "READ-ONLY: Import disabled",
             "count": len(employees)
         }
 

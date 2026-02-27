@@ -60,6 +60,7 @@ class ScheduleRepository {
         .collection('companies')
         .doc(_sanitizedEnv)
         .collection('schedules')
+        .orderBy('timestamp', descending: true)
         .snapshots()
         .map((snapshot) {
       return snapshot.docs.map((doc) => doc.data()).toList();
@@ -150,6 +151,13 @@ class ScheduleRepository {
 
       final jobData = jsonDecode(response.body);
       final jobId = jobData['job_id'];
+      final status = jobData['status'];
+
+      if (status == 'completed') {
+          print("Job completed synchronously!");
+          return jobData; // Already contains 'schedule'
+      }
+
       print("Job started: $jobId. Polling for results...");
 
       // 2. Poll for Completion

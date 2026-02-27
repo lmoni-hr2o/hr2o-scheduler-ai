@@ -1,28 +1,22 @@
-
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
-from sklearn.ensemble import HistGradientBoostingRegressor, HistGradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 from google.cloud import datastore
 from utils.datastore_helper import get_db
 
 class ForecastingService:
     def __init__(self, environment: str):
+        import os, psutil, gc
         self.environment = environment
         self.db = get_db(namespace=environment)
         self.client = self.db.client
         self._df_cache = None
         self._risk_model_cache = None
         
-        import os, psutil, gc
         self._proc = psutil.Process(os.getpid())
         self._gc = gc
-        self._mem_limit_mb = 7000 # Safety cap
+        self._mem_limit_mb = 3500 # 3.5GB Guard for a 4GB Cloud Run instance
 
     def _log_mem(self, label):
         import sys
@@ -164,6 +158,11 @@ class ForecastingService:
         return df
 
     def _train_regressor(self, df: pd.DataFrame, target: str, cat_cols, num_cols):
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        from sklearn.preprocessing import OrdinalEncoder
+        from sklearn.compose import ColumnTransformer
+        from sklearn.pipeline import Pipeline
+        
         # Handle empty
         if len(df) < 10: return None
         self._log_mem(f"Start training regressor on {len(df)} rows")
@@ -191,6 +190,11 @@ class ForecastingService:
         return pipe
 
     def _train_classifier(self, df: pd.DataFrame, target: str, cat_cols, num_cols):
+        from sklearn.ensemble import HistGradientBoostingClassifier
+        from sklearn.preprocessing import OrdinalEncoder
+        from sklearn.compose import ColumnTransformer
+        from sklearn.pipeline import Pipeline
+
         if len(df) < 10: return None
         self._log_mem(f"Start training classifier on {len(df)} rows")
         # Check if we have at least 2 classes
@@ -222,40 +226,34 @@ class ForecastingService:
 
     def get_base_dataframe(self) -> pd.DataFrame:
         """
-        Ultra-efficient fetch using projections and minimal object creation.
-        Uses Categorical dtypes to drastically reduce memory footprint.
+        Ultra-efficient fetch using micro-batches and aggressive object disposal.
+        Avoids projection query index requirements while staying under 4GB RAM.
         """
         if self._df_cache is not None:
             return self._df_cache
         
-        self._log_mem("Start get_base_dataframe (Namespaced Query)")
-        lookback_days = 45 
-        
-        # 1. NAMESPACED QUERY (No filters to avoid index 400 errors)
-        # Using environment namespace isolation (setup in __init__) 
-        query = self.client.query(kind="Period")
-        
-        # 2. STRICT PROJECTION (Crucial: Reduces RAM by ~90% per record)
-        # By NOT using a date filter on the server, we don't need a composite index for projection.
-        # We fetch all (within limit) but very "skinny" records.
-        try:
-            query.projection = [
-                "tmregister", "tmentry", "tmexit", 
-                "activities.id", "activities.code", "activities.typeActivity",
-                "employment.id", "employment.fullName"
-            ]
-            print("DEBUG: Using Projected Fetch (No-Filter Strategy)...")
-            fetch_limit = 50000 
-        except Exception as e:
-            # Should not happen for Kind-only projection, but safe fallback
-            print(f"WARNING: Projection failed ({e}). Using Full Fetch with LOW Limit.")
-            fetch_limit = 3000 
-            
-        print(f"DEBUG: Streaming NAMESPACED periods for {self.environment} (Fetch Limit: {fetch_limit})...")
-        
-        # 45 days is enough for trends while saving ~25% RAM compared to 60 days
+        self._log_mem("Start get_base_dataframe (Micro-Batching)")
+        lookback_days = 180 # 6 months of historical data for ML trends
         cutoff_date = (datetime.now() - timedelta(days=lookback_days)).date()
+
+        # 1. Keys-Only Query
+        # We fetch only keys first - these are very lightweight
+        query = self.client.query(kind="Period")
+        query.keys_only()
         
+        fetch_limit = 25000 # Safety limit
+        
+        try:
+            self._log_mem("Fetching keys...")
+            # CRITICAL: query.fetch() in keys_only mode returns Entities with only keys.
+            # get_multi expects actual Key objects. We must extract them.
+            all_keys = [e.key for e in query.fetch(limit=fetch_limit)]
+            total_keys = len(all_keys)
+            self._log_mem(f"Found {total_keys} keys. Starting micro-batch retrieval.")
+        except Exception as e:
+            print(f"CRITICAL: Key fetch failed: {e}")
+            return pd.DataFrame()
+
         dates_raw = []
         commesse = []
         dipendenti = []
@@ -264,126 +262,109 @@ class ForecastingService:
         assenza = []
         
         count = 0
-        total_scanned = 0
-        use_projection = True # Default to Try Projection
+        batch_size = 100 # Tiny batches to keep RAM spike low
         
-        
-        # --- KEYS-ONLY FETCH (Revision 240) ---
-        # Strategy: Fetch LIGHTWEIGHT keys first (limit 50,000 keys ~ 5MB RAM).
-        # Then fetch ACTUAL entities in tiny micro-batches of 50 using get_multi.
-        # This completely bypasses Query Iterator buffering issues.
-        
-        try:
-            print(f"DEBUG: Starting KEYS-ONLY query (Limit: {fetch_limit})...")
-            query = self.client.query(kind="Period")
-            query.keys_only() # Crucial!
-            
-            # Fetch all keys (safe, keys are tiny)
-            all_keys = list(query.fetch(limit=fetch_limit))
-            total_keys = len(all_keys)
-            print(f"DEBUG: Found {total_keys} keys. Starting MICRO-BATCH retrieval...")
-            
-            # Process in Micro-Batches of 100
-            # 100 records * 1.5MB = ~150MB max RAM spike per batch.
-            micro_batch_size = 100
-            
-            for i in range(0, total_keys, micro_batch_size):
-                chunk_keys = all_keys[i : i + micro_batch_size]
+        for i in range(0, total_keys, batch_size):
+            chunk_keys = all_keys[i : i + batch_size]
+            try:
+                # Fetch full entities for this batch
+                entities = self.client.get_multi(chunk_keys)
                 
-                try:
-                    # Fetch Full Entities by Key
-                    entities = self.client.get_multi(chunk_keys)
-                    
-                    # Process
-                    for p in entities:
-                         try:
-                            # 0. Safety
-                            if not p: continue
+                for p in entities:
+                    try:
+                        # Dotted key lookup helper for flat-nested structures
+                        def get_val(obj, key_variants):
+                            for kv in key_variants:
+                                # Try as direct key (handles flat dotted keys)
+                                if kv in obj: return obj[kv]
+                                # Try as nested path
+                                if "." in kv:
+                                    parts = kv.split(".")
+                                    curr = obj
+                                    for part in parts:
+                                        if isinstance(curr, dict) and part in curr:
+                                            curr = curr[part]
+                                        else:
+                                            curr = None
+                                            break
+                                    if curr is not None: return curr
+                            return None
 
-                            # 1. Date 
-                            qt = p.get("tmregister")
-                            if not qt: continue
-                            if isinstance(qt, str):
-                                dt = datetime.fromisoformat(qt.replace("Z", "+00:00"))
-                            else: dt = qt
-                            
-                            # PYTHON DATE FILTER
-                            if dt.date() < cutoff_date:
-                                continue
-                            
-                            count += 1
-                            
-                            # 2. Activity / Employee
-                            act = p.get("activities") or {} 
-                            if not isinstance(act, dict): act = {}
-                            comm = str(act.get("id") or act.get("code") or "")
-                            
-                            emp = p.get("employment") or {}
-                            if not isinstance(emp, dict): emp = {}
-                            dip = str(emp.get("id") or emp.get("fullName") or "")
-                            
-                            # 3. Hours
-                            st = p.get("tmentry")
-                            en = p.get("tmexit")
-                            if st and isinstance(st, str): st = datetime.fromisoformat(st.replace("Z", "+00:00"))
-                            if en and isinstance(en, str): en = datetime.fromisoformat(en.replace("Z", "+00:00"))
-                            
-                            h = 0.0
-                            sh = 8.0
-                            if st:
-                                sh = st.hour + (st.minute / 60.0)
-                                if en: h = (en - st).total_seconds() / 3600.0
-                            
-                            # 4. Absence
-                            type_a = str(act.get("typeActivity") or "").upper()
-                            is_abs = 1 if any(x in type_a for x in ["ASSENZA", "MALATTIA", "FERIE"]) else 0
-                            if is_abs: h = 0.0
-                            
-                            # Collect
-                            dates_raw.append(dt.date())
-                            commesse.append(comm)
-                            dipendenti.append(dip)
-                            ore.append(h)
-                            start_hours.append(sh)
-                            assenza.append(is_abs)
-                            
-                         except Exception:
-                             continue
-                    
-                    # Memory Check
-                    if (i + len(chunk_keys)) % 1000 == 0:
-                        mem = self._proc.memory_info().rss / (1024 * 1024)
-                        print(f"DEBUG: Processed {i} keys | Memory: {mem:.1f} MB")
-                        if mem > 6000:
-                             print("CRITICAL: Memory Limit. Stopping.")
-                             break
-                             
-                    # Cleanup
-                    del entities
-                    del chunk_keys
-                    
-                except Exception as e_batch:
-                    print(f"ERROR processing micro-batch {i}: {e_batch}")
-                    continue
-                    
-            # Cleanup Keys
-            del all_keys
-            import gc
-            gc.collect()
-            
-        except Exception as e_query:
-            print(f"CRITICAL: Keys fetch failed: {e_query}")
+                        # 1. Date Extraction
+                        qt = get_val(p, ["tmregister", "beginTimePlace.tmregister", "tmRegister"])
+                        if not qt: continue
+                        
+                        if isinstance(qt, str):
+                            try: dt = datetime.fromisoformat(qt.replace("Z", "+00:00"))
+                            except: continue
+                        else: dt = qt
+                        
+                        # PYTHON DATE FILTER (Relaxed to 120 days for more context)
+                        if dt.date() < cutoff_date:
+                            continue
+                        
+                        # 2. Activity / Employee
+                        # Try nested or flat dotted access
+                        act_id = str(get_val(p, ["activities.id", "activities.code"]) or "")
+                        # Handle case where activities is a list (common in Period)
+                        acts = p.get("activities")
+                        if isinstance(acts, list) and len(acts) > 0:
+                            a0 = acts[0]
+                            if not act_id: act_id = str(a0.get("id") or a0.get("code") or "")
+                        
+                        emp_id = str(get_val(p, ["employment.id", "employment.fullName", "employment.code"]) or "")
+                        
+                        # 3. Hours
+                        st = get_val(p, ["tmentry", "beginTimePlace.tmregister", "beginTimePlan"])
+                        en = get_val(p, ["tmexit", "endTimePlace.tmregister", "endTimePlan"])
+                        
+                        if isinstance(st, str):
+                            try: st = datetime.fromisoformat(st.replace("Z", "+00:00"))
+                            except: st = None
+                        if isinstance(en, str):
+                            try: en = datetime.fromisoformat(en.replace("Z", "+00:00"))
+                            except: en = None
+                        
+                        h = 0.0
+                        sh = 8.0
+                        if st:
+                            sh = st.hour + (st.minute / 60.0)
+                            if en: h = (en - st).total_seconds() / 3600.0
+                        
+                        # 4. Absence
+                        # Check activity type from any available source
+                        type_a = str(get_val(p, ["activities.typeActivity"]) or "").upper()
+                        is_abs = 1 if any(x in type_a for x in ["ASSENZA", "MALATTIA", "FERIE"]) else 0
+                        
+                        # Collect
+                        dates_raw.append(dt.date())
+                        commesse.append(act_id)
+                        dipendenti.append(emp_id)
+                        ore.append(h)
+                        start_hours.append(sh)
+                        assenza.append(is_abs)
+                        
+                        count += 1
+                    except:
+                        continue
+                
+                # Cleanup batch immediately
+                del entities
+                if i % 1000 == 0:
+                    self._log_mem(f"Processed {i} / {total_keys} keys...")
+                    self._gc.collect()
+
+            except Exception as e_batch:
+                print(f"WARNING: Batch {i} failed: {e_batch}")
+                continue
         
         print(f"DEBUG: [ForecastingService] Data fetch complete. Total: {count} records.")
 
-        print(f"DEBUG: Data collected. Count: {count}, Valid: {len(dates_raw)}")
-        
         if not dates_raw:
             self._df_cache = pd.DataFrame()
             return self._df_cache
             
         # Build DataFrame with MEMORY EFFICIENT DTYPES
-        # 'category' is used for strings with many repetitions (Activities, Employees)
         df = pd.DataFrame({
             "data": pd.to_datetime(dates_raw),
             "societa": pd.Series([self.environment] * len(dates_raw), dtype="category"),
@@ -395,8 +376,8 @@ class ForecastingService:
             "is_assenza": np.array(assenza, dtype=np.int16)
         })
         
-        # Immediate cleanup
-        del dates_raw, commesse, dipendenti, ore, start_hours, assenza
+        # Final cleanup
+        del dates_raw, commesse, dipendenti, ore, start_hours, assenza, all_keys
         self._gc.collect()
         
         df = df.sort_values("data")
@@ -461,7 +442,7 @@ class ForecastingService:
             }
         except: return None
 
-    def predict_demand(self, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
+    def predict_demand(self, start_date: datetime, end_date: datetime, activity_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """
         Trains model on history and predicts daily demand (ore_tot) for each active Activity.
         Returns list of daily demand objects.
@@ -473,7 +454,7 @@ class ForecastingService:
             return []
 
         # Aggregate Daily Demand per Activity
-        # CRITICAL: observed=True prevents Cartesian OOM with large category lists (PROFER scale)
+        # CRITICAL: observed=True prevents Cartesian OOM
         comm_daily = df.groupby(["societa", "commessa", "data"], as_index=False, observed=True).agg(
             ore_tot=("ore_lavorate", "sum")
         )
@@ -486,6 +467,10 @@ class ForecastingService:
         for c in comm_daily.columns:
             if "rollmean" in c:
                 comm_daily[c] = comm_daily[c].fillna(0)
+
+        # GET LAST STATES for rolling features
+        # We need this BEFORE we filter/train to have the most recent history
+        last_states = comm_daily.sort_values("data").groupby("commessa", observed=True).tail(1).set_index("commessa")
 
         cat_cols = ["societa", "commessa", "dow", "month", "woy"]
         num_cols = [c for c in comm_daily.columns if "rollmean" in c] + ["day", "week", "t_index"]
@@ -502,26 +487,27 @@ class ForecastingService:
         
         update_status(message="Previsione fabbisogno neurale...", progress=0.3, phase="OPTIMIZATION")
 
-        # Loop di previsione (Date target)
+        # Prediction Horizon
         horizon = pd.date_range(start_date, end_date, freq="D")
         
-        # We need to construct the future dataframe.
-        # We take all known commesse
-        active_commesse = comm_daily["commessa"].unique()
+        # FILTER ACTIVITIES: Only predict for activities provided, OR a subset if too many
+        if activity_ids:
+            active_commesse = [c for c in comm_daily["commessa"].unique() if str(c) in [str(x) for x in activity_ids]]
+            print(f"DEBUG: Forecasting filtered to {len(active_commesse)} requested activities.")
+        else:
+            # If no filter, limit to top 200 activities by recent volume to prevent OOM
+            recent_active = comm_daily.groupby("commessa", observed=True)["ore_tot"].sum().sort_values(ascending=False)
+            active_commesse = recent_active.head(200).index.tolist()
+            print(f"DEBUG: No activity filter provided. Limited to top {len(active_commesse)} activities by volume.")
         
         predictions = []
-        
-        # Stats generation: Duration and Start Hour
         base_date = comm_daily["data"].min()
         
-        # Duration: filter out potential zero-hour artifacts
+        # Stats generation: Duration and Start Hour
         duration_stats = df[df["ore_lavorate"] > 0].groupby("commessa", observed=True)["ore_lavorate"].median().to_dict()
-        
-        # Start stats: simple median per activity
         start_stats = df.groupby("commessa", observed=True)["start_hour"].median().to_dict()
         
-        # Rilevamento Giorni Attivi (Active DOW): quali giorni hanno effettivamente lavoro?
-        # Un giorno è attivo se ha una somma di ore storica > 0
+        # Day of Week activity detection
         active_dows = comm_daily.groupby("dow")["ore_lavorate"].sum()
         active_dows = active_dows[active_dows > 0].index.tolist()
         print(f"DEBUG: Giorni della settimana storicamente attivi: {active_dows}")

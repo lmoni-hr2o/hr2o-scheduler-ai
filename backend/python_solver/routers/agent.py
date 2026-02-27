@@ -9,7 +9,7 @@ from utils.datastore_helper import get_db
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
-# Note: EXTERNAL_* constants removed as we now use Datastore (synced via /sync)
+
 
 @router.get("/ping")
 def ping():
@@ -29,7 +29,7 @@ def get_companies(environment: str = Depends(verify_hmac)):
             
             if has_hist or emp_count > 0:
                 data = dict(entity)
-                data["id"] = entity.key.name
+                data["id"] = str(entity.key.id_or_name)
                 results.append(data)
         return results
     except Exception as e:
@@ -38,14 +38,24 @@ def get_companies(environment: str = Depends(verify_hmac)):
 
 @router.get("/activities", response_model=List[Activity])
 def get_activities(environment: str = Depends(verify_hmac)):
-    """Fetches synced activities from Datastore."""
+    """Fetches synced activities from Datastore. Filters out likely legacy items."""
     try:
         client = get_db(namespace=environment).client
         query = client.query(kind="Activity")
         results = []
-        for entity in query.fetch():
+        
+        # Simple heuristic to identify legacy activities
+        legacy_years = ["2020", "2021", "2022", "2023", "2024"]
+        
+        for entity in query.fetch ():
             data = dict(entity)
-            data["id"] = entity.key.name
+            name = str(data.get("name") or "").upper()
+            
+            # Skip if name explicitly mentions an old year
+            if any(year in name for year in legacy_years):
+                continue
+                
+            data["id"] = str(entity.key.id_or_name)
             results.append(Activity(**data))
         return results
     except Exception as e:
@@ -61,7 +71,7 @@ def get_employment(environment: str = Depends(verify_hmac)):
         results = []
         for entity in query.fetch():
             data = dict(entity)
-            data["id"] = entity.key.name
+            data["id"] = str(entity.key.id_or_name)
             results.append(Employment(**data))
         return results
     except Exception as e:
@@ -106,7 +116,7 @@ def create_period(period: Period, environment: str = Depends(verify_hmac)):
         key = client.key("Period", period.id or "new")
         entity = datastore.Entity(key=key)
         entity.update(period.dict())
-        client.put(entity)
+        # client.put(entity)
         return period
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -117,7 +127,7 @@ def get_diagnostics(environment: str = Depends(verify_hmac)):
     return {"status": "ok", "mode": "synced"}
 
 @router.post("/reset_status")
-def reset_status():
+def reset_status(): 
     from utils.status_manager import set_running
     set_running(False)
     return {"status": "System status reset to IDLE"}
@@ -181,5 +191,5 @@ def save_mappings(mapping_data: Dict[str, List[str]], environment: str = Depends
         "last_updated": datetime.now()
     })
     
-    client.put(entity)
-    return {"status": "success", "message": "Data mappings saved."}
+    # client.put(entity)
+    return {"status": "success", "message": "READ-ONLY: Mapping save disabled."}

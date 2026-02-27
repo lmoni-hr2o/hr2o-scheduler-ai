@@ -94,7 +94,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                        showDialog(
                          context: context,
                          builder: (_) => AiReportDialog(
-                           schedule: state.schedules.first['schedule'],
+                           schedule: state.schedules.first['schedule'] ?? state.schedules.first['result'] ?? [],
                            startDate: _visibleWeekStart,
                            endDate: visibleWeekEnd,
                          ),

@@ -102,13 +102,9 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
             key_source = client.key("Company", comp_id, namespace=namespace)
             bg_source = datastore.Entity(key=key_source)
             bg_source.update(comp_data)
-            client.put(bg_source)
-
-            # Store in Self Namespace (for agent)
-            key_self = client.key("Company", comp_id, namespace=comp_id)
-            bg_self = datastore.Entity(key=key_self)
-            bg_self.update(comp_data)
-            client.put(bg_self)
+            # client.put(bg_source)
+            # client.put(bg_self)
+            pass
             
     # B. Employments
     valid_employees: Dict[str, Employment] = {}
@@ -322,10 +318,15 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
         
         # Get Company ID (Namespace) from our map
         emp_ns = emp_comp_map.get(e_id)
-        if not emp_ns: continue
+        if not emp_ns or emp_ns == namespace: 
+            # If the employment's environment is the root namespace, 
+            # we should still try to find a better one if possible, 
+            # but for History/Periods we MUST have a specific numeric company ID.
+            # However, if it's genuinely a root-level period, we keep it there.
+            pass
         
         # Mark company as having history (Active)
-        companies_with_history.add(emp_ns)
+        if emp_ns: companies_with_history.add(emp_ns)
 
         # Period ID
         pid = str(p.get("id"))
@@ -350,7 +351,8 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
         }
         
         entity.update(period_data)
-        batch.put(entity)
+        # batch.put(entity)
+        pass
         count += 1
         
         if count % 400 == 0:
@@ -415,15 +417,9 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
         if ent_source:
             ent_source["has_history"] = has_hist
             ent_source["active_employees_count"] = emp_count
-            batch.put(ent_source)
-            
-        # Update in Self Namespace
-        key_self = client.key("Company", cid, namespace=cid)
-        ent_self = client.get(key_self)
-        if ent_self:
-            ent_self["has_history"] = has_hist
-            ent_self["active_employees_count"] = emp_count
-            batch.put(ent_self)
+            # batch.put(ent_source)
+            # batch.put(ent_self)
+            pass
             
         count += 2
         if count % 400 == 0:
@@ -451,7 +447,8 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
         entity.update(data)
         entity.update({"last_sync": datetime.now()})
         
-        batch.put(entity)
+        # batch.put(entity)
+        pass
         count += 1
         
         if count % 400 == 0:
@@ -474,7 +471,8 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
             for old_p in q_old.fetch():
                 if old_p.key.name and old_p.key.name.startswith("AUTO_"):
                     # We only delete if it exists to keep DB clean
-                    cleanup_batch.delete(old_p.key)
+                    # cleanup_batch.delete(old_p.key)
+                    pass
                     c_count += 1
                     if c_count % 400 == 0:
                         cleanup_batch.commit()
@@ -510,7 +508,8 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
                 "is_default": False,
                 "last_updated": datetime.now()
             })
-            batch.put(ent_p)
+            # batch.put(ent_p)
+            pass
             count += 1
             if count % 400 == 0:
                 batch.commit()
@@ -519,21 +518,21 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
 
     # 3. Save Activities 
     for act_unique_key, act_obj in unique_activities.items():
-        # Optimization: If activity is at root of namespace, save it to ALL discovered companies
-        # so they can all select it in the UI.
+        # WE ONLY SAVE TO THE SPECIFIC COMPANY NS if it's a numeric ID
+        # or to the root namespace. We STOP replicating all to all.
         target_namespaces = [act_obj.environment]
-        if act_obj.environment == namespace:
-            target_namespaces.extend(list(valid_company_ids))
-            # Deduplicate just in case
-            target_namespaces = list(set(target_namespaces))
-
+        
+        # If the activity belongs to the ROOT namespace, we EXPOSING it 
+        # but only as a discovery source, not replicating to every numeric company.
+        # This prevents the Advisor from seeing 2000 activities per company.
+        
         for target_ns in target_namespaces:
             if not target_ns: continue
             key = client.key("Activity", act_obj.id, namespace=target_ns)
             entity = datastore.Entity(key=key)
             entity.update(act_obj.dict(exclude_none=True))
             entity.update({"last_sync": datetime.now()})
-            batch.put(entity)
+            # batch.put(entity)
             count += 1
             if count % 400 == 0:
                 batch.commit()
