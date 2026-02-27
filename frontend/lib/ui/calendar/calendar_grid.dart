@@ -161,7 +161,7 @@ class _CalendarGridState extends State<CalendarGrid> {
                       
                       if (activeEmployees.isNotEmpty)
                         for (var emp in activeEmployees)
-                          _buildEmployeeRow(emp, shifts, unavailabilities, s.employees, s, days, weekStart, shiftCache),
+                          _buildEmployeeRow(emp, shifts, unavailabilities, s.employees, s, days, weekStart, shiftCache, activityNameMap),
                     ],
                   ),
                 ),
@@ -184,7 +184,7 @@ class _CalendarGridState extends State<CalendarGrid> {
     );
   }
 
-  Widget _buildEmployeeRow(Employment emp, List<dynamic> shifts, List unavailabilities, List<Employment> employees, ScheduleLoaded state, List<String> days, DateTime weekStart, Map<String, List<dynamic>> shiftCache) {
+  Widget _buildEmployeeRow(Employment emp, List<dynamic> shifts, List unavailabilities, List<Employment> employees, ScheduleLoaded state, List<String> days, DateTime weekStart, Map<String, List<dynamic>> shiftCache, Map<String, String> activityNameMap) {
     return Container(
       decoration: BoxDecoration(
         border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.04))),
