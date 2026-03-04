@@ -80,7 +80,26 @@ class DemandService:
     def _generate_from_balancer(self, start_dt: datetime, end_dt: datetime, activities: List[dict]) -> List[dict]:
         from utils.demand_profiler import get_demand_profile
         profile = get_demand_profile(self.environment)
-        if not profile: return []
+        if not profile:
+            # Smart defaults: Create 1 default shift per activity (up to 20 activities) per day
+            shifts = []
+            num_days = (end_dt - start_dt).days + 1
+            max_activities = activities[:20] if activities else []
+            for d in range(num_days):
+                current_date = (start_dt + timedelta(days=d))
+                date_str = current_date.date().isoformat()
+                for s_idx, act in enumerate(max_activities):
+                    act_id = str(act.get("id", "fallback"))
+                    shifts.append({
+                        "id": f"default_{act_id}_{date_str}_{s_idx}",
+                        "date": date_str,
+                        "start_time": "08:00",
+                        "end_time": "14:00",
+                        "role": "WORKER",
+                        "activity_id": act_id,
+                        "project": act.get("project")
+                    })
+            return shifts
 
         shifts = []
         num_days = (end_dt - start_dt).days + 1

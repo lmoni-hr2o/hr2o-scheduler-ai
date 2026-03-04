@@ -161,12 +161,12 @@ class AdvisorEngine:
                 # SIGNIFICANT CHANGE: If we have historical demand, we treat unprofiled contractual demand 
                 # as "noise" or "optional tasks" and cap it heavily to avoid the 5000h spike.
                 if total_historical_hours > 0:
-                    # If we have history, unprofiled activities contribute very little 
-                    # (only as a 'safety' placeholder)
                     total_demand_hours = total_historical_hours + min(total_contractual_hours, 10.0)
                 else:
-                    # Full fallback if absolutely no history
-                    total_demand_hours = total_contractual_hours
+                    realistic_cap = total_contract_hours * 1.25
+                    if total_contractual_hours > realistic_cap:
+                         total_contractual_hours = realistic_cap
+                    total_demand_hours = max(total_contractual_hours, 40.0)
 
                 print(f"DEBUG Advisor: Hist={total_historical_hours:.1f}h, Contractual(New)={total_contractual_hours:.1f}h. Matched={matched_from_profile}")
 
@@ -180,8 +180,12 @@ class AdvisorEngine:
         gap = total_contract_hours - total_demand_hours
         utilization = (total_demand_hours / total_contract_hours * 100) if total_contract_hours > 0 else 0
         
-        summary = f"Analisi Tecnica: Disponibilità {total_contract_hours:.1f}h vs Carico Totale {total_demand_hours:.1f}h "
-        summary += f"(Storico: {total_historical_hours:.1f}h, Stimato/Contrattuale: {total_contractual_hours:.1f}h). "
+        summary = f"Analisi Tecnica: Disponibilità {total_contract_hours:.1f}h vs Carico Stimato {total_demand_hours:.1f}h "
+        
+        if total_historical_hours > 0:
+             summary += f"(Storico: {total_historical_hours:.1f}h, Extra: {total_contractual_hours:.1f}h). "
+        else:
+             summary += f"(Dati storici assenti. Stimato in base ai dipendenti). "
 
         if utilization > 95:
             summary += "Attenzione: saturazione altissima (>95%). Rischio elevato di turni scoperti."
