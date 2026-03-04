@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Set
-import requests
+from utils.api_client import api_client
 from datetime import datetime, timedelta
 from google.cloud import datastore
 from models import Employment, Activity, Period, LaborProfile, TimePlace
@@ -9,22 +9,10 @@ from utils.demand_profiler import DemandProfiler
 
 router = APIRouter(prefix="/sync", tags=["Sync"])
 
-BASE_URL = "https://europe-west3-hrtimeplace.cloudfunctions.net"
-
 def fetch_external(endpoint: str, namespace: str, params: dict = None) -> List[dict]:
-    """Helper to fetch from external Cloud Functions."""
-    url = f"{BASE_URL}/{endpoint}"
-    if not params: params = {}
-    params["namespace"] = namespace
-    
-    try:
-        print(f"DEBUG: Fetching {url} with {params}")
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(f"ERROR fetching {endpoint}: {e}")
-        return []
+    """Helper to fetch from external Cloud Functions using reused session."""
+    return api_client.fetch_external(endpoint, namespace, params)
+
 
 @router.post("/full")
 def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
