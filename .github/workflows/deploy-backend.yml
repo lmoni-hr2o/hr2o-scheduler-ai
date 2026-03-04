@@ -14,6 +14,10 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -30,8 +34,6 @@ jobs:
       - name: Authorize Docker
         run: gcloud auth configure-docker gcr.io
 
-
-
       - name: Build and Push Container
         run: |
           docker build -t gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA ./backend/python_solver
@@ -44,4 +46,5 @@ jobs:
             --region $REGION \
             --platform managed \
             --allow-unauthenticated \
-            --memory 2Gi
+            --memory 2Gi \
+            --set-env-vars READ_ONLY_MODE=true
