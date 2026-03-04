@@ -39,9 +39,17 @@ def solve_worker(payload: WorkerPayload):
         return {"status": "error", "message": "Job not found"}
 
     # Update status to processing
+    environment = job.get("environment")
+    key = client.key("AsyncJob", job_id, namespace=environment)
+    job = client.get(key) # Refresh with namespace
+    
+    if not job:
+        print(f"CRITICAL: Job {job_id} not found in namespace {environment}")
+        return {"status": "error"}
+
     job["status"] = "processing"
-    job["updated_at"] = datetime.datetime.utcnow()
-    # client.put(job) # DISABLED: Read-only mode
+    job["updated_at"] = datetime.datetime.now()
+    # client.put(job)
 
     try:
         req_data = {}
@@ -52,7 +60,6 @@ def solve_worker(payload: WorkerPayload):
 
         employees = req_data.get("employees", [])
         activities = req_data.get("activities", [])
-        environment = job.get("environment")
 
         # 1. Fetch Employees if missing
         if not employees:
@@ -69,14 +76,6 @@ def solve_worker(payload: WorkerPayload):
                      "name": emp.get("name"), 
                      "fullName": emp.get("fullName") or emp.get("name"), 
                      "role": emp.get("role"), 
-                     "preferences": emp.get("preferences") or [0.5, 0.5],
-                     "project_ids": emp.get("project_ids") or [],
-                     "customer_keywords": emp.get("customer_keywords") or [],
-                     "address": emp.get("address"),
-                     "bornDate": emp.get("bornDate"),
-                     "labor_profile_id": emp.get("labor_profile_id"),
-                     "dtHired": emp.get("dtHired"),
-                     "dtDismissed": emp.get("dtDismissed")
                 })
         
         # 2. Fetch Activities if missing
@@ -96,7 +95,7 @@ def solve_worker(payload: WorkerPayload):
         unavailabilities = req_data.get("unavailabilities", [])
 
         # 4. SOLVE
-        print(f"WORKER: Solving for {len(employees)} employees, {len(required_shifts)} shifts.")
+        print(f"WORKER: Solving for Job {job_id}")
         
         result = solve_schedule(
             employees=employees, 
@@ -109,18 +108,19 @@ def solve_worker(payload: WorkerPayload):
             environment=environment
         )
 
-        # 5. Result Handling (ReadOnly - just log)
-        if isinstance(result, list):
-            is_empty_run = len(result) == 0
-            if is_empty_run:
-                print("WORKER: Job finished - No demand found.")
-            else:
-                print(f"WORKER: Job finished successfully - {len(result)} shifts assigned.")
-        else:
-             print("WORKER: Job finished - Infeasible or No Solution.")
+        # 5. Result Handling: Save back to Datastore
+        job["status"] = "completed"
+        job["result"] = compress_payload(json.dumps(result))
+        job["updated_at"] = datetime.datetime.now()
+        # # client.put(job)
+        print(f"WORKER: [Read-Only] Job {job_id} Completed (No Save).")
 
     except Exception as e:
         print(f"WORKER CRITICAL Error: {e}")
+        job["status"] = "failed"
+        job["error"] = str(e)
+        job["updated_at"] = datetime.datetime.now()
+        # client.put(job)
         traceback.print_exc()
     
     return {"status": "ok"}

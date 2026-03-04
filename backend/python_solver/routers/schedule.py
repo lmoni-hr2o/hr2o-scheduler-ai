@@ -34,31 +34,41 @@ class GenerateRequest(BaseModel):
     activities: Optional[List[dict]] = []
     constraints: Optional[dict] = {}
 
+from utils.errors import PlannerError
+from config import settings
+
+def get_current_db(environment: str = Depends(verify_hmac)):
+    db = get_db(namespace=environment)
+    return db.client, environment
+
 @router.post("/generate")
-def generate_schedule(req: GenerateRequest, environment: str = Depends(verify_hmac)):
+def generate_schedule(
+    req: GenerateRequest, 
+    environment: str = Depends(verify_hmac)
+):
     """
-    Synchronous generation: Solves directly and returns results. No Datastore writes.
+    Purely synchronous and stateless generation. 
+    Returns results directly without writing to Datastore (Read-Only).
     """
     try:
-        print(f"DEBUG: Starting Synchronous Solve for env {environment}")
+        print(f"DEBUG: Starting Synchronous Read-Only Solve for env {environment}")
         
-        # Call solver directly in the request (Stateless)
         results = solve_schedule(
-            environment=environment,
-            start_date_str=req.start_date,
-            end_date_str=req.end_date,
             employees=req.employees,
             required_shifts=req.required_shifts,
             unavailabilities=req.unavailabilities,
+            constraints=req.constraints,
+            start_date_str=req.start_date,
+            end_date_str=req.end_date,
             activities=req.activities,
-            constraints=req.constraints
+            environment=environment
         )
         
         return {
             "status": "completed",
-            "job_id": str(uuid.uuid4()),
+            "job_id": f"sync_{uuid.uuid4().hex[:8]}",
             "schedule": results,
-            "message": "Schedule generated successfully (Synchronous/ReadOnly)."
+            "message": "Schedule generated successfully (Read-Only Mode)."
         }
 
     except Exception as e:
@@ -71,6 +81,7 @@ def generate_schedule(req: GenerateRequest, environment: str = Depends(verify_hm
 def get_historical_schedule(
     start_date: str, 
     end_date: str, 
+    min_duration: int = 60,
     environment: str = Depends(verify_hmac)
 ):
     """
@@ -128,7 +139,7 @@ def get_historical_schedule(
                 h2, m2 = map(int, e_str.split(':'))
                 dur = (h2 * 60 + m2) - (h1 * 60 + m1)
                 if dur < 0: dur += 1440
-                if dur < 60: continue # Skip very short tasks/commesse
+                if dur < min_duration: continue # Skip short tasks based on config
             except:
                 pass
 
@@ -159,23 +170,20 @@ def get_historical_schedule(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/job/{job_id}")
-def get_job_status(job_id: str):
+def get_job_status(
+    job_id: str, 
+    db_ctx: tuple = Depends(get_current_db)
+):
     """
-    Polls the status of an async job. (READ-ONLY Fallback)
+    Polls the status of an async job within the environment namespace.
     """
+    client, environment = db_ctx
     try:
-        client = get_db().client
-        key = client.key("AsyncJob", job_id)
+        key = client.key("AsyncJob", job_id, namespace=environment)
         job = client.get(key)
 
         if not job:
-            # If not found, maybe it was a sync job that finished instantly.
-            # Return "completed" with empty results as a fallback for frontend.
-            return {
-                "job_id": job_id,
-                "status": "completed",
-                "message": "Job handled synchronously (Read-Only Mode)."
-            }
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found. It may have expired or was never created.")
         
         status = job.get("status", "unknown")
         

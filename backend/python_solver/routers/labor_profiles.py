@@ -104,9 +104,9 @@ def clone_profile(profile_id: str, target_company_id: str, new_name: str = None,
         "last_updated": datetime.now()
     })
     
-    client.put(entity)
+    # client.put(entity)
     
-    return {"status": "success", "new_profile_id": new_id}
+    return {"status": "success", "new_profile_id": new_id, "message": "READ-ONLY: Clone disabled"}
 
 @router.get("/assignments/{company_id}")
 def list_assignments(company_id: str, environment: str = Depends(verify_hmac)):

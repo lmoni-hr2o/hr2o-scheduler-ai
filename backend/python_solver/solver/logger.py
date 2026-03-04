@@ -24,7 +24,8 @@ def save_log(action: str, selected_id: str, rejected_id: str, shift_data: dict, 
         'environment': environment
     })
     
-    client.put(log_entry)
+    # client.put(log_entry)
+    pass
 
 def get_all_logs(environment: str):
     """Retrieves all logs for a specific environment from Datastore."""

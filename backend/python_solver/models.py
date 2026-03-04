@@ -1,5 +1,5 @@
 from typing import List, Optional, Any, Dict
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from datetime import datetime
 from enum import Enum
 
@@ -23,34 +23,57 @@ class TimePlace(BaseModel):
     place_id: str
     detection_system: Optional[PositionDetectionSystem] = PositionDetectionSystem.manual
 
+class ShiftBase(BaseModel):
+    id: Optional[str] = None
+    employee_id: Optional[str] = None
+    date: str # YYYY-MM-DD
+    start_time: str # HH:mm
+    end_time: str # HH:mm
+    role: str = "worker"
+    activity_id: Optional[str] = None
+    project: Optional[str] = None
+
+class ShiftPlanned(ShiftBase):
+    affinity: float = 0.0
+    is_unassigned: bool = False
+    absence_risk: float = 0.0
+    labor_profile_id: Optional[str] = None
+
+class ShiftActual(ShiftBase):
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    detection_system: Optional[PositionDetectionSystem] = PositionDetectionSystem.manual
+    timestamp: Optional[datetime] = None
+
 class Period(BaseModel):
+    """
+    Historical record of an assignment (Turno).
+    Combines planning and actual data for Datastore.
+    """
     id: Optional[str] = None
     environment: str
-    tmregister: Optional[datetime] = Field(default_factory=datetime.now)
+    tmregister: datetime = Field(default_factory=datetime.now)
     allDay: bool = True
-    partialDay: Optional[str] = "G" # G=ALL, P=Pomeriggio, M=Mattino
     
-    # Planning
+    # Life-cycle Data
+    planned: Optional[ShiftPlanned] = None
+    actual_start: Optional[ShiftActual] = None
+    actual_end: Optional[ShiftActual] = None
+    
+    # Legacy Fields (for backward compatibility if needed)
     beginTimePlan: Optional[datetime] = None
     endTimePlan: Optional[datetime] = None
-    
-    # Place (Time + Location)
-    beginTimePlace: Optional[TimePlace] = None
-    endTimePlace: Optional[TimePlace] = None
-    
-    # Calculation
     beginTimeCalc: Optional[datetime] = None
     endTimeCalc: Optional[datetime] = None
     
-    # Coordinates
-    latitude: Optional[float] = 0.0
-    longitude: Optional[float] = 0.0
-    
-    positionDetectionSystem: PositionDetectionSystem = PositionDetectionSystem.manual
-    timeDetectionSystem: TimeDetectionSystem = TimeDetectionSystem.manual
-    logs: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    logs: List[Dict[str, Any]] = Field(default_factory=list)
 
 class Activity(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+        validate_assignment=False,
+        extra='ignore'
+    )
     id: str
     name: str
     code: Optional[str] = None
@@ -90,6 +113,11 @@ class LaborProfile(BaseModel):
     last_updated: datetime = Field(default_factory=datetime.now)
 
 class Employment(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+        validate_assignment=False,
+        extra='ignore'
+    )
     id: str
     name: str = "Unknown Company"
     fullName: str = "Unknown Employee"

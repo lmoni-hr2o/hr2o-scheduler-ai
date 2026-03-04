@@ -1,19 +1,25 @@
 from google.cloud import storage
-import tensorflow as tf
+try:
+    import tensorflow as tf
+except ImportError:
+    tf = None
 import numpy as np
 import os
 
-# Robust Keras import
+# Robust ML imports
+layers, Sequential = None, None
 try:
-    from tensorflow.keras import layers, Sequential
-except ImportError:
-    try:
+    if tf:
+        from tensorflow.keras import layers, Sequential
+    else:
         from keras import layers, Sequential
-    except ImportError:
-        # Fallback for some weird builds
+except (ImportError, AttributeError):
+    try:
         import keras
         layers = keras.layers
         Sequential = keras.Sequential
+    except ImportError:
+        pass
 
 class NeuralScorer:
     _instance = None
@@ -90,7 +96,9 @@ class NeuralScorer:
             self.load_weights()
 
     def save_weights(self):
-        """Saves weights to local temp and uploads to GCS."""
+        """Saves weights to local temp and uploads to GCS. SKIPPED in Read-Only Mode."""
+        if os.getenv("READ_ONLY_MODE", "true").lower() == "true":
+            return
         if self.model is None: return
         try:
             self.model.save_weights(self.local_weights_path)

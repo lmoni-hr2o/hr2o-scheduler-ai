@@ -101,7 +101,10 @@ class DatastoreBatch:
         return self
     
     def commit(self):
-        """Commits all batched operations"""
+        """Commits all batched operations. SKIPPED in Read-Only Mode."""
+        if os.getenv("READ_ONLY_MODE", "true").lower() == "true":
+            print("DATASTORE: Commit skipped (Read-Only Mode)")
+            return
         entities_to_put = []
         
         for op_type, key, data, merge in self.operations:
@@ -181,7 +184,10 @@ class DocumentReference:
         return None
     
     def set(self, data: Dict[str, Any]):
-        """Creates or updates the entity"""
+        """Creates or updates the entity. SKIPPED in Read-Only Mode."""
+        if os.getenv("READ_ONLY_MODE", "true").lower() == "true":
+            print(f"DATASTORE: Set skipped for {self.key} (Read-Only Mode)")
+            return
         entity = datastore.Entity(key=self.key)
         entity.update(data)
         self.client.put(entity)
