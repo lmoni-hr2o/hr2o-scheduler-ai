@@ -44,8 +44,8 @@ def get_activities(environment: str = Depends(verify_hmac)):
         query = client.query(kind="Activity")
         results = []
         
-        # Simple heuristic to identify legacy activities
-        legacy_years = ["2020", "2021", "2022", "2023", "2024"]
+        # Only filter explicitly old/retired years (NOT 2024 - still active!)
+        legacy_years = ["2020", "2021", "2022", "2023"]
         
         for entity in query.fetch ():
             data = dict(entity)
