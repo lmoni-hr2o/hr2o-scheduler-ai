@@ -69,10 +69,35 @@ def get_employment(environment: str = Depends(verify_hmac)):
         client = get_db(namespace=environment).client
         query = client.query(kind="Employment")
         results = []
+        now_str = datetime.now().date().isoformat()
+        
         for entity in query.fetch():
             data = dict(entity)
+            
+            # 1. Filter Dismissed
+            dt_dismissed = data.get("dtDismissed")
+            if dt_dismissed:
+                # If it's a date or string, compare. 
+                # Datastore usually returns strings or datetime objects.
+                d_str = dt_dismissed.isoformat() if hasattr(dt_dismissed, "isoformat") else str(dt_dismissed)
+                if d_str < now_str: 
+                    continue # Employee is gone
+            
+            # 2. Filter Not Yet Hired
+            dt_hired = data.get("dtHired")
+            if dt_hired:
+                h_str = dt_hired.isoformat() if hasattr(dt_hired, "isoformat") else str(dt_hired)
+                if h_str > now_str:
+                    continue # Not started yet
+            
+            # 3. Filter Inactive/Zero Hours (Optional but usually correct for scheduling)
+            if data.get("contract_hours") == 0:
+                continue
+                
             data["id"] = str(entity.key.id_or_name)
             results.append(Employment(**data))
+        
+        print(f"AGENT: Fetched {len(results)} active employees for {environment}")
         return results
     except Exception as e:
         print(f"ERROR fetching employment: {e}")
