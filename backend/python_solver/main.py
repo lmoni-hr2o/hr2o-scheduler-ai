@@ -109,7 +109,7 @@ app.include_router(worker.router)
 
 @app.on_event("startup")
 async def startup_event():
-    print("STARTUP: Running version V2-FIX-PROFILER-VERIFICATION")
+    print("STARTUP: Running version READ-ONLY-SYNC-V1")
     # RESET LOCK on startup: In case of previous crash, ensure we aren't blocked
     print("Startup: Clearing any stale locks...")
     try:

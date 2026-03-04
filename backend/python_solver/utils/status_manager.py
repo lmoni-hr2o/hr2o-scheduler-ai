@@ -90,9 +90,11 @@ def set_running(is_running: bool, force: bool = False, namespace: str = None):
             # TTL check
             is_stale = False
             if last_upd and isinstance(last_upd, datetime):
-                 if datetime.now() - last_upd > timedelta(minutes=LOCK_TTL_MINUTES):
+                 # Handle timezone-aware vs naive comparison
+                 from datetime import timezone
+                 now = datetime.now(timezone.utc) if last_upd.tzinfo else datetime.now()
+                 if now - last_upd > timedelta(minutes=LOCK_TTL_MINUTES):
                      is_stale = True
-
             if is_running:
                 # Try to acquire lock
                 if current_status == "busy" and current_worker != worker_id and not is_stale and not force:

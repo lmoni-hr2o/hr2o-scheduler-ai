@@ -18,3 +18,9 @@
 ## 4. Backend: `routers/schedule.py` (API Layer)
 - [x] **Configurable Shift Filter**: Move the 60-minute hardcoded filter to a query parameter or company-specific configuration.
 - [x] **Job Status Error Handling**: Return a `404 Not Found` error when a job is missing, instead of the potentially confusing "Read-Only Mode" message.
+
+## 5. Backend: Read-Only Refactoring 
+- [x] **Synchronous `/generate`**: Refactored the endpoint to be purely synchronous and stateless.
+- [x] **Global Read-Only Guard**: Implemented `READ_ONLY_MODE` to disable Datastore and GCS writes globally.
+- [x] **Optional ML dependencies**: Made TensorFlow and Keras optional to improve stability in constrained environments.
+- [ ] **Production Verification**: Confirm synchronous operation on Cloud Run with the verification script.
