@@ -298,8 +298,11 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
         constraints: _currentDemand.toJson(), // PASS AI Suggestion weights
       );
       
-      // 4. Save to Firestore for persistence
-      await repository.saveScheduleToFirestore(scheduleData);
+      // 4. Save to Firestore for persistence (Non-blocking)
+      repository.saveScheduleToFirestore(scheduleData).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => print("Firestore save timeout, but continuing..."),
+      ).catchError((e) => print("Firestore save error: $e"));
       
       final history = await repository.getHistoricalSchedule(
         event.start.subtract(const Duration(days: 7)),
@@ -312,6 +315,7 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
         unavailabilities: _currentUnavailabilities,
         employees: _currentEmployees,
         activities: _currentActivities,
+        demandConfig: _currentDemand,
       ));
     } catch (e) {
       emit(ScheduleError(e.toString()));
