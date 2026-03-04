@@ -88,6 +88,7 @@ class ScheduleError extends ScheduleState {
 class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
   final ScheduleRepository repository;
   StreamSubscription? _scheduleSubscription;
+  bool _isGenerating = false; // FLAG: pause Firestore stream during generation
   List<Map<String, dynamic>> _currentUnavailabilities = [];
 
   List<Employment> _currentEmployees = [];
@@ -215,8 +216,18 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
 
       _scheduleSubscription?.cancel();
       _scheduleSubscription = repository.getSchedules().listen(
-        (data) => add(SchedulesUpdated(data, history)),
-        onError: (error) => add(SchedulesUpdated([], history)), // Handle error gracefully or emit another event.
+        (data) {
+          if (_isGenerating) {
+            print("BLOC: Firestore update suppressed (generation in progress).");
+            return;
+          }
+          print("BLOC: Firestore stream update. docs=${data.length}");
+          add(SchedulesUpdated(data, history));
+        },
+        onError: (error) {
+          print("BLOC: Firestore stream error: $error");
+          if (!_isGenerating) add(SchedulesUpdated([], history));
+        },
       );
     } catch (e) {
       emit(ScheduleError(e.toString()));
@@ -287,28 +298,40 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
       }
       */
 
-      // 2. Trigger Generation with updated brains
+      // 2. Trigger Generation - pause Firestore stream so it doesn't overwrite our result
+      _isGenerating = true;
       emit(ScheduleLoading(message: "Ottimizzazione neurale in corso..."));
+
       final scheduleData = await repository.triggerGeneration(
         startDate: event.start, 
         endDate: event.end,
         employees: _currentEmployees,
         activities: _currentActivities,
         unavailabilities: _currentUnavailabilities,
-        constraints: _currentDemand.toJson(), // PASS AI Suggestion weights
+        constraints: _currentDemand.toJson(),
       );
       
-      // 4. Save to Firestore for persistence (Non-blocking)
+      // DEBUG: Log what the backend actually returned
+      final scheduleList = scheduleData['schedule'] ?? scheduleData['result'] ?? [];
+      print("BLOC: Generation complete. Status=${scheduleData['status']}, Shifts=${scheduleList.length}, Keys=${scheduleData.keys.toList()}");
+      if (scheduleList.isEmpty) {
+        print("BLOC WARNING: Backend returned 0 shifts! Raw response: $scheduleData");
+      } else {
+        print("BLOC: Sample shift[0]: ${scheduleList.first}");
+      }
+
+      // 3. Save to Firestore for persistence (Non-blocking - fire and forget)
       repository.saveScheduleToFirestore(scheduleData).timeout(
         const Duration(seconds: 5),
-        onTimeout: () => print("Firestore save timeout, but continuing..."),
-      ).catchError((e) => print("Firestore save error: $e"));
+        onTimeout: () => print("Firestore save timeout, continuing..."),
+      ).catchError((e) => print("Firestore save error (non-blocking): $e"));
       
       final history = await repository.getHistoricalSchedule(
         event.start.subtract(const Duration(days: 7)),
         event.end.add(const Duration(days: 7)),
       );
 
+      // Emit result BEFORE re-enabling the Firestore stream
       emit(ScheduleLoaded(
         [scheduleData], 
         historicalSchedules: history,
@@ -317,7 +340,16 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
         activities: _currentActivities,
         demandConfig: _currentDemand,
       ));
+      print("BLOC: ScheduleLoaded emitted with ${(scheduleData['schedule'] ?? []).length} shifts.");
+
+      // Re-enable stream AFTER emit, with a delay to prevent immediate overwrite
+      Future.delayed(const Duration(seconds: 3), () {
+        _isGenerating = false;
+        print("BLOC: Firestore stream re-enabled.");
+      });
     } catch (e) {
+      _isGenerating = false;
+      print("BLOC ERROR in generation: $e");
       emit(ScheduleError(e.toString()));
     }
   }
