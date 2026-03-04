@@ -148,7 +148,11 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
         update_status(message="Solving...", progress=0.8)
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = settings.SOLVE_TIMEOUT_SECONDS
+        solver.parameters.num_search_workers = 4  # Use multiple cores
         status = solver.Solve(model)
+        
+        status_names = {0: 'UNKNOWN', 1: 'MODEL_INVALID', 2: 'FEASIBLE', 3: 'INFEASIBLE', 4: 'OPTIMAL'}
+        print(f"SOLVER: Status={status_names.get(status, status)}, Shifts={len(required_shifts)}, Employees={len(employees)}, WallTime={solver.WallTime():.1f}s")
 
         if status == cp_model.INFEASIBLE:
             raise InfeasibleError("No valid solution found with current constraints", detail=solver.ResponseStats())

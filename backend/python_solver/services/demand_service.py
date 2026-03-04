@@ -86,7 +86,7 @@ class DemandService:
             # No historical data at all. Try activity-based defaults.
             shifts = []
             num_days = (end_dt - start_dt).days + 1
-            max_activities = activities[:20] if activities else []
+            # CAP to 3 activities per day to prevent CP-SAT timeout (20 activities × 28 days = 580 unassignable shifts!)\n            max_activities = activities[:3] if activities else []
             
             if max_activities:
                 print(f"DEMAND_SERVICE: No profile. Generating defaults for {len(max_activities)} activities.")

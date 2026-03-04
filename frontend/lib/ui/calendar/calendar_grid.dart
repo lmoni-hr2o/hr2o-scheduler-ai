@@ -162,6 +162,74 @@ class _CalendarGridState extends State<CalendarGrid> {
                       if (activeEmployees.isNotEmpty)
                         for (var emp in activeEmployees)
                           _buildEmployeeRow(emp, shifts, unavailabilities, s.employees, s, days, weekStart, shiftCache, activityNameMap),
+                      
+                      // Unassigned Shifts Row: shows shifts not yet placed on any employee
+                      Builder(builder: (ctx) {
+                        final unassignedByDate = <String, List<dynamic>>{};
+                        for (final shift in shifts) {
+                          if (shift['is_unassigned'] == true || shift['employee_id'] == 'unassigned') {
+                            final d = shift['date']?.toString() ?? '';
+                            if (d.isNotEmpty) unassignedByDate.putIfAbsent(d, () => []).add(shift);
+                          }
+                        }
+                        final totalUnassigned = unassignedByDate.values.fold(0, (a, b) => a + b.length);
+                        if (totalUnassigned == 0) return const SizedBox.shrink();
+                        return Container(
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withOpacity(0.05),
+                            border: Border(top: BorderSide(color: Colors.orange.withOpacity(0.3), width: 1)),
+                          ),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 140, height: 80,
+                                child: Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 16),
+                                      const SizedBox(height: 2),
+                                      Text('DA ASSEGNARE', style: TextStyle(color: Colors.orange, fontSize: 7, fontWeight: FontWeight.w900, letterSpacing: 1)),
+                                      Text('$totalUnassigned turni', style: TextStyle(color: Colors.orange.withOpacity(0.7), fontSize: 8)),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              for (int d = 0; d < 7; d++)
+                                Expanded(
+                                  child: Container(
+                                    height: 80,
+                                    decoration: BoxDecoration(border: Border(left: BorderSide(color: Colors.orange.withOpacity(0.1)))),
+                                    child: Builder(builder: (ctx2) {
+                                      final dateStr = weekStart.add(Duration(days: d)).toIso8601String().split('T')[0];
+                                      final dayUnassigned = unassignedByDate[dateStr] ?? [];
+                                      if (dayUnassigned.isEmpty) return const SizedBox();
+                                      return Padding(
+                                        padding: const EdgeInsets.all(3),
+                                        child: Column(
+                                          children: dayUnassigned.take(3).map((sh) => Container(
+                                            margin: const EdgeInsets.only(bottom: 2),
+                                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: Colors.orange.withOpacity(0.15),
+                                              borderRadius: BorderRadius.circular(3),
+                                              border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                                            ),
+                                            child: Text(
+                                              '${sh['start_time']} - ${sh['end_time']}',
+                                              style: TextStyle(color: Colors.orange[200], fontSize: 7, fontWeight: FontWeight.bold),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          )).toList(),
+                                        ),
+                                      );
+                                    }),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      }),
                     ],
                   ),
                 ),
