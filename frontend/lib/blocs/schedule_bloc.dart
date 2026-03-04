@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
 import '../repositories/schedule_repository.dart';
@@ -11,6 +12,12 @@ abstract class ScheduleEvent extends Equatable {
 
 class LoadInitialData extends ScheduleEvent {}
 class LoadSchedules extends ScheduleEvent {}
+
+class SchedulesUpdated extends ScheduleEvent {
+  final List<dynamic> schedules;
+  final List<dynamic> history;
+  SchedulesUpdated(this.schedules, this.history);
+}
 
 class GenerateSchedules extends ScheduleEvent {
   final DateTime start;
@@ -80,7 +87,9 @@ class ScheduleError extends ScheduleState {
 // Bloc
 class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
   final ScheduleRepository repository;
+  StreamSubscription? _scheduleSubscription;
   List<Map<String, dynamic>> _currentUnavailabilities = [];
+
   List<Employment> _currentEmployees = [];
   List<Activity> _currentActivities = [];
   DemandConfig _currentDemand = const DemandConfig();
@@ -88,6 +97,7 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
   ScheduleBloc({required this.repository}) : super(ScheduleInitial()) {
     on<LoadInitialData>(_onLoadInitialData);
     on<LoadSchedules>(_onLoadSchedules);
+    on<SchedulesUpdated>(_onSchedulesUpdated);
     on<GenerateSchedules>(_onGenerateSchedules);
     on<ToggleUnavailability>(_onToggleUnavailability);
     on<UpdateDemandConfig>(_onUpdateDemandConfig);
@@ -203,21 +213,25 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
         now.add(const Duration(days: 30)),
       );
 
-      await emit.forEach(
-        repository.getSchedules(),
-        onData: (data) => ScheduleLoaded(
-          data, 
-          historicalSchedules: history,
-          unavailabilities: _currentUnavailabilities,
-          employees: _currentEmployees,
-          activities: _currentActivities,
-          demandConfig: _currentDemand,
-        ),
-        onError: (_, __) => ScheduleError("Failed to load schedules"),
+      _scheduleSubscription?.cancel();
+      _scheduleSubscription = repository.getSchedules().listen(
+        (data) => add(SchedulesUpdated(data, history)),
+        onError: (error) => add(SchedulesUpdated([], history)), // Handle error gracefully or emit another event.
       );
     } catch (e) {
       emit(ScheduleError(e.toString()));
     }
+  }
+
+  void _onSchedulesUpdated(SchedulesUpdated event, Emitter<ScheduleState> emit) {
+    emit(ScheduleLoaded(
+      event.schedules, 
+      historicalSchedules: event.history,
+      unavailabilities: _currentUnavailabilities,
+      employees: _currentEmployees,
+      activities: _currentActivities,
+      demandConfig: _currentDemand,
+    ));
   }
 
   void _onGenerateSchedules(GenerateSchedules event, Emitter<ScheduleState> emit) async {
@@ -353,5 +367,11 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
     } catch (e) {
       print("Error learning demand details: $e");
     }
+  }
+
+  @override
+  Future<void> close() {
+    _scheduleSubscription?.cancel();
+    return super.close();
   }
 }
