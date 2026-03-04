@@ -10,19 +10,20 @@ class DemandService:
         self.environment = environment
         self.forecaster = ForecastingService(environment)
 
-    def generate_shifts(self, start_date: str, end_date: str, activities: List[dict] = []) -> List[dict]:
+    def generate_shifts(self, start_date: str, end_date: str, activities: List[dict] = [], employees: List[dict] = []) -> List[dict]:
         """
         Main entry point for demand generation. 
-        Tries ML first, falls back to Demand Profiler, then to smart defaults.
+        Tries ML first, falls back to Capacity-based generation.
         """
         start_dt = datetime.fromisoformat(start_date)
         end_dt = datetime.fromisoformat(end_date)
         
         try:
+            # We try ML/Profile first if we have enough data
             return self._generate_from_ml(start_dt, end_dt, activities)
         except Exception as e:
-            print(f"ML Forecasting failed ({e}), using fallback.")
-            return self._generate_from_balancer(start_dt, end_dt, activities)
+            print(f"ML Forecasting failed or disabled ({e}), using capacity-based fallback.")
+            return self._generate_from_capacity(start_dt, end_dt, activities, employees)
 
     def _generate_from_ml(self, start_dt: datetime, end_dt: datetime, activities: List[dict]) -> List[dict]:
         active_ids = [str(a.get("id")) for a in activities if a.get("id")]
@@ -40,7 +41,6 @@ class DemandService:
 
         shifts = []
         for item in predicted_demand:
-            # Chunking logic translated from engine.py
             act_id = str(item["activity_id"])
             date_str = item["date"]
             act_info = next((a for a in activities if str(a.get("id")) == act_id), None)
@@ -54,9 +54,6 @@ class DemandService:
             i = 0
             while remaining >= 2.0:
                 block = min(target_dur, remaining)
-                if 0 < (remaining - block) < 2.0 and remaining <= 12.0:
-                    block = remaining
-                
                 curr_h = typical_start + ((i % 4) * 0.25)
                 start_h, start_m = int(curr_h), int((curr_h - int(curr_h)) * 60)
                 end_h, end_m = int(curr_h + block), int(((curr_h + block) - int(curr_h + block)) * 60)
@@ -77,78 +74,42 @@ class DemandService:
                 i += 1
         return shifts
 
-    def _generate_from_balancer(self, start_dt: datetime, end_dt: datetime, activities: List[dict]) -> List[dict]:
-        from utils.demand_profiler import get_demand_profile
-        profile = get_demand_profile(self.environment)
-        print(f"DEMAND_SERVICE: profile_keys={len(profile)} activities_count={len(activities)}")
-        
-        if not profile:
-            # No historical data at all. Try activity-based defaults.
-            shifts = []
-            num_days = (end_dt - start_dt).days + 1
-            # CAP to 3 activities per day to prevent CP-SAT timeout (20 activities × 28 days = 580 unassignable shifts!)\n            max_activities = activities[:3] if activities else []
-            
-            if max_activities:
-                print(f"DEMAND_SERVICE: No profile. Generating defaults for {len(max_activities)} activities.")
-                for d in range(num_days):
-                    current_date = (start_dt + timedelta(days=d))
-                    date_str = current_date.date().isoformat()
-                    for s_idx, act in enumerate(max_activities):
-                        act_id = str(act.get("id", "fallback"))
-                        shifts.append({
-                            "id": f"default_{act_id}_{date_str}_{s_idx}",
-                            "date": date_str,
-                            "start_time": "08:00",
-                            "end_time": "14:00",
-                            "role": "WORKER",
-                            "activity_id": act_id,
-                            "project": act.get("project")
-                        })
-            else:
-                # LAST RESORT: No activities, no profile → generate 1 generic shift per day
-                # This ensures the scheduler always has SOMETHING to assign employees to.
-                print(f"DEMAND_SERVICE: No profile, no activities. Generating {num_days} generic placeholder shifts.")
-                for d in range(num_days):
-                    current_date = (start_dt + timedelta(days=d))
-                    date_str = current_date.date().isoformat()
-                    shifts.append({
-                        "id": f"generic_{date_str}_01",
-                        "date": date_str,
-                        "start_time": "08:00",
-                        "end_time": "16:00",
-                        "role": "WORKER",
-                        "activity_id": "generic",
-                        "project": None
-                    })
-            print(f"DEMAND_SERVICE: Generated {len(shifts)} fallback shifts.")
-            return shifts
-
-        shifts = []
+    def _generate_from_capacity(self, start_dt: datetime, end_dt: datetime, activities: List[dict], employees: List[dict]) -> List[dict]:
+        """
+        CAPACITY-BASED LOGIC:
+        Ensures every employee has a shift to fill. 
+        Infects specific activities into these slots if available.
+        """
         num_days = (end_dt - start_dt).days + 1
+        num_employees = len(employees) if employees else 1
+        
+        print(f"DEMAND_SERVICE: Generating for Capacity ({num_employees} emps) over {num_days} days.")
+        
+        shifts = []
         for d in range(num_days):
             current_date = (start_dt + timedelta(days=d))
             date_str = current_date.date().isoformat()
-            dow = str(current_date.weekday())
             
-            active_ids = {str(a.get("id")) for a in activities if a.get("id")}
-            for act_id, dow_patterns in profile.items():
-                if active_ids and str(act_id) not in active_ids: continue
-                if dow not in dow_patterns: continue
+            # For each active employee, we want to see a block on the grid
+            for e_idx in range(num_employees):
+                # Distribute activities if we have them
+                # e.g. Emp 0 gets Act 0, Emp 1 gets Act 1... Emp 11 gets nothing (generic)
+                act_idx = e_idx
+                current_act = activities[act_idx] if activities and act_idx < len(activities) else None
                 
-                slots = dow_patterns[dow]
-                if isinstance(slots, dict): slots = [slots]
+                act_id = str(current_act.get("id")) if current_act else "generic"
+                act_name = current_act.get("name", "Lavoro Normale") if current_act else "Lavoro Normale"
                 
-                act_info = next((a for a in activities if str(a.get("id")) == str(act_id)), None)
-                for p_idx, p in enumerate(slots):
-                    qty = p.get("quantity", 1)
-                    for s_idx in range(qty):
-                        shifts.append({
-                            "id": f"learned_{act_id}_{date_str}_{p['start_time'].replace(':','')}_slot_{s_idx}",
-                            "date": date_str,
-                            "start_time": p["start_time"],
-                            "end_time": p["end_time"],
-                            "role": p.get("role", "worker").upper(),
-                            "activity_id": act_id,
-                            "project": act_info.get("project") if act_info else None
-                        })
+                shifts.append({
+                    "id": f"cap_{date_str}_{e_idx}",
+                    "date": date_str,
+                    "start_time": "08:00",
+                    "end_time": "14:00",
+                    "role": "WORKER",
+                    "activity_id": act_id,
+                    "activity_name": act_name,
+                    "project": current_act.get("project") if current_act else None
+                })
+        
+        print(f"DEMAND_SERVICE: Capacity shifts generated: {len(shifts)}")
         return shifts

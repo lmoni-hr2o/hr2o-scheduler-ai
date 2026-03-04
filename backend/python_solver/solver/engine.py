@@ -50,11 +50,12 @@ def solve_schedule(employees: list, required_shifts: list, unavailabilities: lis
         # 2. Demand Generation (Service)
         demand_service = DemandService(environment)
         if not required_shifts:
-            update_status(message="Generating Demand...", progress=0.1)
-            required_shifts = demand_service.generate_shifts(start_date_str, end_date_str, activities)
+            update_status(message="Generating Capacity-Based Demand...", progress=0.1)
+            # PASS EMPLOYEES to ensure we cover the whole team
+            required_shifts = demand_service.generate_shifts(start_date_str, end_date_str, activities, employees)
         
         if not required_shifts:
-            update_status(message="No shifts to solve", progress=1.0)
+            update_status(message="No shifts or capacity found to solve", progress=1.0)
             return []
 
         # 3. Model Initialization
