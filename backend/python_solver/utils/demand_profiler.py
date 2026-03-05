@@ -34,6 +34,7 @@ class DemandProfiler:
         # 1. Accumulate all historical shifts
         history = {} 
         valid_dates = set()
+        sessions = {}
 
         for p in raw_periods:
             try:
