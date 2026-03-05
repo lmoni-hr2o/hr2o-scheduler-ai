@@ -20,7 +20,10 @@ def resolve_environment_to_id(environment: Optional[str]) -> Optional[str]:
     if env_str.upper() == "OVERCLEAN":
         return env_str
         
-    client = datastore.Client()
+    global _RESOLVER_CLIENT
+    if '_RESOLVER_CLIENT' not in globals():
+        _RESOLVER_CLIENT = datastore.Client()
+    client = _RESOLVER_CLIENT
     
     # 1. See if the ID works directly (Company entity usually copied to its own namespace)
     # actually, querying the namespace metadata directly is safer.

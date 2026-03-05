@@ -11,6 +11,9 @@ from utils.company_resolver import resolve_environment_to_id
 # Constant to replace firestore.SERVER_TIMESTAMP
 SERVER_TIMESTAMP = datetime.utcnow
 
+# Global cache for Datastore clients to prevent gRPC channel memory leaks
+_CLIENT_CACHE = {}
+
 class DatastoreClient:
     """Wrapper around Datastore client to mimic Firestore API"""
     
@@ -21,8 +24,15 @@ class DatastoreClient:
             resolved_ns = resolve_environment_to_id(os.getenv("DATASTORE_NAMESPACE"))
             
         self.namespace = resolved_ns
-        self.client = datastore.Client(namespace=self.namespace)
-        print(f"DEBUG: Initialized DatastoreClient. Requested ns: {namespace}, Resolved to: {self.namespace}")
+        
+        # Cache datastore client instances to prevent memory leaks from 
+        # repeated gRPC channel creation on fast polling endpoints
+        cache_key = self.namespace or "default"
+        if cache_key not in _CLIENT_CACHE:
+            _CLIENT_CACHE[cache_key] = datastore.Client(namespace=self.namespace)
+            print(f"DEBUG: Created new cached datastore.Client for ns: {self.namespace}")
+            
+        self.client = _CLIENT_CACHE[cache_key]
     
     def collection(self, collection_name: str):
         """Returns a CollectionReference-like object"""

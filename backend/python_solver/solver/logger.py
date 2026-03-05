@@ -3,7 +3,10 @@ from datetime import datetime
 import json
 
 def get_client():
-    return datastore.Client()
+    global _LOGGER_CLIENT
+    if '_LOGGER_CLIENT' not in globals():
+        _LOGGER_CLIENT = datastore.Client()
+    return _LOGGER_CLIENT
 
 def init_db():
     """Datastore doesn't need explicit initialization like SQL."""
