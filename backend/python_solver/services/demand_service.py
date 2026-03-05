@@ -18,6 +18,7 @@ class DemandService:
         start_dt = datetime.fromisoformat(start_date)
         end_dt = datetime.fromisoformat(end_date)
         
+        active_ids = [str(a.get("id")) for a in activities if a.get("id")]
         try:
             # 1. Strategy A: ML/Neural Forecasting
             # We try ML first for dynamic demand prediction
