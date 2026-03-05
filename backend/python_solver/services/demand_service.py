@@ -19,19 +19,27 @@ class DemandService:
         end_dt = datetime.fromisoformat(end_date)
         
         try:
-            # We try ML/Profile first if we have enough data
-            return self._generate_from_ml(start_dt, end_dt, activities)
+            # 1. Strategy A: ML/Neural Forecasting
+            # We try ML first for dynamic demand prediction
+            preds = self.forecaster.predict_demand(start_dt, end_dt, activity_ids=active_ids)
+            if preds:
+                print(f"DEMAND_SERVICE: Strategy ML success ({len(preds)} predictions)")
+                return self._generate_from_ml(preds, activities)
+            
+            # 2. Strategy B: High-Fidelity Profile
+            # Fallback to learned patterns (qty/start/end/role) if ML is not confident
+            from utils.demand_profiler import get_demand_profile
+            profile = get_demand_profile(self.environment)
+            if profile:
+                print(f"DEMAND_SERVICE: Strategy PROFILE success (Found learned patterns)")
+                return self._generate_from_profile(profile, start_dt, end_dt, activities)
+
+            raise ValueError("No ML or Profile data available")
         except Exception as e:
-            print(f"ML Forecasting failed or disabled ({e}), using capacity-based fallback.")
+            print(f"DEMAND_SERVICE: Advanced generation failed or disabled ({e}), using capacity-based fallback.")
             return self._generate_from_capacity(start_dt, end_dt, activities, employees)
 
-    def _generate_from_ml(self, start_dt: datetime, end_dt: datetime, activities: List[dict]) -> List[dict]:
-        active_ids = [str(a.get("id")) for a in activities if a.get("id")]
-        predicted_demand = self.forecaster.predict_demand(start_dt, end_dt, activity_ids=active_ids)
-        
-        if not predicted_demand:
-            raise ValueError("No ML predictions available")
-
+    def _generate_from_ml(self, predicted_demand: List[dict], activities: List[dict]) -> List[dict]:
         # Memory Guard
         available_mem_gb = psutil.virtual_memory().available / (1024**3)
         memory_limit = max(settings.MIN_MEMORY_LIMIT, int(available_mem_gb * settings.SHIFTS_PER_GB))
@@ -86,6 +94,42 @@ class DemandService:
                 })
                 remaining -= block
                 i += 1
+        return shifts
+
+    def _generate_from_profile(self, profile: Dict[str, Any], start_dt: datetime, end_dt: datetime, activities: List[dict]) -> List[dict]:
+        """
+        PROFILE-BASED LOGIC:
+        Uses learned patterns (e.g. Activity X on Monday usually has 2 slots 08:00-14:00).
+        """
+        num_days = (end_dt - start_dt).days + 1
+        shifts = []
+        
+        for d in range(num_days):
+            curr_date = start_dt + timedelta(days=d)
+            date_str = curr_date.date().isoformat()
+            dow = str(curr_date.weekday())
+            
+            for act_info in activities:
+                aid = str(act_info.get("id"))
+                if aid in profile and dow in profile[aid]:
+                    patterns = profile[aid][dow]
+                    for i, p in enumerate(patterns):
+                        qty = p.get("quantity", 1)
+                        s_time = p.get("start_time", "08:00")
+                        e_time = p.get("end_time", "14:00")
+                        role = p.get("role", "WORKER")
+                        
+                        for q in range(qty):
+                            shifts.append({
+                                "id": f"prof_{aid}_{date_str}_{i}_{q}",
+                                "date": date_str,
+                                "start_time": s_time,
+                                "end_time": e_time,
+                                "role": role,
+                                "activity_id": aid,
+                                "activity_name": act_info.get("name"),
+                                "project": act_info.get("project")
+                            })
         return shifts
 
     def _generate_from_capacity(self, start_dt: datetime, end_dt: datetime, activities: List[dict], employees: List[dict]) -> List[dict]:

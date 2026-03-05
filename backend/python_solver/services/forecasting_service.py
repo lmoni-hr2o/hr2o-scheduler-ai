@@ -237,127 +237,102 @@ class ForecastingService:
         lookback_days = 180 # 6 months of historical data for ML trends
         cutoff_date = (datetime.now() - timedelta(days=lookback_days)).date()
 
-        # 1. Keys-Only Query
-        # We fetch only keys first - these are very lightweight
+        # 1. Primary Query (scoped by environment property)
         query = self.client.query(kind="Period")
+        query.add_filter("environment", "=", self.environment)
         query.keys_only()
         
-        fetch_limit = 25000 # Safety limit
-        
+        fetch_limit = 25000
         try:
-            self._log_mem("Fetching keys...")
-            # CRITICAL: query.fetch() in keys_only mode returns Entities with only keys.
-            # get_multi expects actual Key objects. We must extract them.
+            self._log_mem("Fetching primary keys...")
             all_keys = [e.key for e in query.fetch(limit=fetch_limit)]
+            
+            # FALLBACK: If no keys found but we are in a namespace, try global query in that namespace
+            if not all_keys:
+                print(f"DEBUG: Primary query for {self.environment} empty. Trying global namespace query.")
+                global_query = self.client.query(kind="Period")
+                global_query.keys_only()
+                all_keys = [e.key for e in global_query.fetch(limit=fetch_limit)]
+
             total_keys = len(all_keys)
             self._log_mem(f"Found {total_keys} keys. Starting micro-batch retrieval.")
         except Exception as e:
             print(f"CRITICAL: Key fetch failed: {e}")
             return pd.DataFrame()
 
-        dates_raw = []
-        commesse = []
-        dipendenti = []
-        ore = []
-        start_hours = []
-        assenza = []
+        dates_raw, commesse, dipendenti, ore, start_hours, assenza = [], [], [], [], [], []
         
         count = 0
-        batch_size = 100 # Tiny batches to keep RAM spike low
+        batch_size = 200 # Efficient batch size
         
         for i in range(0, total_keys, batch_size):
             chunk_keys = all_keys[i : i + batch_size]
             try:
-                # Fetch full entities for this batch
                 entities = self.client.get_multi(chunk_keys)
-                
                 for p in entities:
                     try:
-                        # Dotted key lookup helper for flat-nested structures
-                        def get_val(obj, key_variants):
+                        # Robust lookup helper (handles flat-nested and list structures)
+                        def get_val_adv(obj, key_variants):
                             for kv in key_variants:
-                                # Try as direct key (handles flat dotted keys)
-                                if kv in obj: return obj[kv]
-                                # Try as nested path
+                                if kv in obj:
+                                    val = obj[kv]
+                                    if isinstance(val, list) and len(val) > 0: return val[0]
+                                    return val
                                 if "." in kv:
                                     parts = kv.split(".")
                                     curr = obj
                                     for part in parts:
-                                        if isinstance(curr, dict) and part in curr:
-                                            curr = curr[part]
+                                        if isinstance(curr, list) and len(curr) > 0: curr = curr[0]
+                                        if isinstance(curr, dict) and part in curr: curr = curr[part]
                                         else:
                                             curr = None
                                             break
-                                    if curr is not None: return curr
+                                    if curr is not None:
+                                        if isinstance(curr, list) and len(curr) > 0: return curr[0]
+                                        return curr
                             return None
 
                         # 1. Date Extraction
-                        qt = get_val(p, ["tmregister", "beginTimePlace.tmregister", "tmRegister"])
+                        qt = get_val_adv(p, ["tmregister", "tmRegister", "beginTimePlace.tmregister", "beginTimePlan"])
                         if not qt: continue
-                        
-                        if isinstance(qt, str):
-                            try: dt = datetime.fromisoformat(qt.replace("Z", "+00:00"))
-                            except: continue
+                        if not hasattr(qt, "hour"):
+                             from utils.date_utils import parse_date
+                             dt = parse_date(qt)
                         else: dt = qt
-                        
-                        # PYTHON DATE FILTER (Relaxed to 120 days for more context)
-                        if dt.date() < cutoff_date:
-                            continue
+                        if not dt: continue
+                        if dt.date() < cutoff_date: continue
                         
                         # 2. Activity / Employee
-                        # Try nested or flat dotted access
-                        act_id = str(get_val(p, ["activities.id", "activities.code"]) or "")
-                        # Handle case where activities is a list (common in Period)
-                        acts = p.get("activities")
-                        if isinstance(acts, list) and len(acts) > 0:
-                            a0 = acts[0]
-                            if not act_id: act_id = str(a0.get("id") or a0.get("code") or "")
+                        act_id = str(get_val_adv(p, ["activities.id", "activities.code", "activityId"]) or "")
+                        emp_id = str(get_val_adv(p, ["employment.id", "employment.fullName", "employment.code", "employeeId"]) or "")
                         
-                        emp_id = str(get_val(p, ["employment.id", "employment.fullName", "employment.code"]) or "")
+                        # 3. Time
+                        st = get_val_adv(p, ["tmentry", "beginTimePlace.tmregister", "beginTimePlan"])
+                        en = get_val_adv(p, ["tmexit", "endTimePlace.tmregister", "endTimePlan"])
                         
-                        # 3. Hours
-                        st = get_val(p, ["tmentry", "beginTimePlace.tmregister", "beginTimePlan"])
-                        en = get_val(p, ["tmexit", "endTimePlace.tmregister", "endTimePlan"])
+                        if st and not hasattr(st, "hour"):
+                             from utils.date_utils import parse_date
+                             st = parse_date(st)
+                        if en and not hasattr(en, "hour"):
+                             from utils.date_utils import parse_date
+                             en = parse_date(en)
                         
-                        if isinstance(st, str):
-                            try: st = datetime.fromisoformat(st.replace("Z", "+00:00"))
-                            except: st = None
-                        if isinstance(en, str):
-                            try: en = datetime.fromisoformat(en.replace("Z", "+00:00"))
-                            except: en = None
-                        
-                        h = 0.0
-                        sh = 8.0
+                        h, sh = 0.0, 8.0
                         if st:
                             sh = st.hour + (st.minute / 60.0)
                             if en: h = (en - st).total_seconds() / 3600.0
                         
                         # 4. Absence
-                        # Check activity type from any available source
-                        type_a = str(get_val(p, ["activities.typeActivity"]) or "").upper()
+                        type_a = str(get_val_adv(p, ["activities.typeActivity", "typeActivity"]) or "").upper()
                         is_abs = 1 if any(x in type_a for x in ["ASSENZA", "MALATTIA", "FERIE"]) else 0
                         
-                        # Collect
-                        dates_raw.append(dt.date())
-                        commesse.append(act_id)
-                        dipendenti.append(emp_id)
-                        ore.append(h)
-                        start_hours.append(sh)
-                        assenza.append(is_abs)
-                        
+                        dates_raw.append(dt.date()); commesse.append(act_id); dipendenti.append(emp_id)
+                        ore.append(h); start_hours.append(sh); assenza.append(is_abs)
                         count += 1
-                    except:
-                        continue
-                
-                # Cleanup batch immediately
+                    except: continue
                 del entities
-                if i % 1000 == 0:
-                    self._log_mem(f"Processed {i} / {total_keys} keys...")
-                    self._gc.collect()
-
-            except Exception as e_batch:
-                print(f"WARNING: Batch {i} failed: {e_batch}")
-                continue
+                if i % 2000 == 0: self._log_mem(f"Processed {i}"); self._gc.collect()
+            except Exception as e_batch: continue
         
         print(f"DEBUG: [ForecastingService] Data fetch complete. Total: {count} records.")
 
