@@ -15,6 +15,35 @@ router = APIRouter(prefix="/agent", tags=["Agent"])
 def ping():
     return {"status": "Agent Router is reachable"}
 
+from datetime import datetime, date
+import dateutil.parser as date_parser
+
+def safe_parse_date(v) -> Optional[date]:
+    if not v:
+        return None
+    if isinstance(v, (datetime, date)):
+        return v.date() if hasattr(v, 'date') else v
+    
+    s = str(v).strip()
+    if not s or s.lower() == "none":
+        return None
+        
+    try:
+        # Try primary ISO format or dateutil magic for "Sep 30, 2020"
+        dt = date_parser.parse(s)
+        return dt.date()
+    except:
+        # Fallback for DD/MM/YYYY
+        if "/" in s:
+            try:
+                parts = s.split("/")
+                if len(parts) == 3:
+                   # Try DD/MM/YYYY
+                   return date(int(parts[2]), int(parts[1]), int(parts[0]))
+            except:
+                pass
+    return None
+
 @router.get("/companies")
 def get_companies(environment: str = Depends(verify_hmac)):
     """Fetches synced companies from Datastore."""
@@ -25,14 +54,19 @@ def get_companies(environment: str = Depends(verify_hmac)):
         print(f"AGENT: Raw companies fetched: {len(all_ents)} for {environment}")
         results = []
         for entity in all_ents:
-            # Show companies that either have historical data OR at least one active employee
+            # Show ALL companies for now to be safe, but mark their status
+            data = dict(entity)
+            data["id"] = str(entity.key.id_or_name)
+            
+            # Diagnostic info
             has_hist = entity.get("has_history") is True
             emp_count = entity.get("active_employees_count") or 0
             
-            if has_hist or emp_count > 0:
-                data = dict(entity)
-                data["id"] = str(entity.key.id_or_name)
+            # If the user is seeing NOTHING, let's relax the filter 
+            # and just show everything that has a name
+            if data.get("name"):
                 results.append(data)
+                
         print(f"AGENT: Final visible companies: {len(results)}")
         return results
     except Exception as e:
@@ -47,14 +81,12 @@ def get_activities(environment: str = Depends(verify_hmac)):
         query = client.query(kind="Activity")
         results = []
         
-        # Only filter explicitly old/retired years (NOT 2024 - still active!)
         legacy_years = ["2020", "2021", "2022", "2023"]
         
-        for entity in query.fetch ():
+        for entity in query.fetch():
             data = dict(entity)
             name = str(data.get("name") or "").upper()
             
-            # Skip if name explicitly mentions an old year
             if any(year in name for year in legacy_years):
                 continue
                 
@@ -72,7 +104,7 @@ def get_employment(environment: str = Depends(verify_hmac)):
         client = get_db(namespace=environment).client
         query = client.query(kind="Employment")
         results = []
-        now_str = datetime.now().date().isoformat()
+        today = date.today()
         
         entities = list(query.fetch())
         print(f"AGENT: Raw entities fetched: {len(entities)} for namespace {environment}")
@@ -82,37 +114,22 @@ def get_employment(environment: str = Depends(verify_hmac)):
             emp_name = data.get("fullName", "Unknown")
             
             # 1. Filter Dismissed
-            dt_dismissed = data.get("dtDismissed")
-            if dt_dismissed:
-                d_str = dt_dismissed.isoformat() if hasattr(dt_dismissed, "isoformat") else str(dt_dismissed)
-                # Ensure ISO format for comparison if it's DD/MM/YYYY
-                if "/" in d_str and len(d_str) == 10:
-                    parts = d_str.split("/")
-                    d_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
-                
-                if d_str < now_str and d_str.strip() != "":
-                    print(f"AGENT: Skipping {emp_name} - dismissed on {d_str}")
-                    continue
+            dt_dismissed = safe_parse_date(data.get("dtDismissed"))
+            if dt_dismissed and dt_dismissed < today:
+                print(f"AGENT: Skipping {emp_name} - dismissed on {dt_dismissed}")
+                continue
             
             # 2. Filter Not Yet Hired
-            dt_hired = data.get("dtHired")
-            if dt_hired:
-                h_str = dt_hired.isoformat() if hasattr(dt_hired, "isoformat") else str(dt_hired)
-                if "/" in h_str and len(h_str) == 10:
-                    parts = h_str.split("/")
-                    h_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
-                
-                if h_str > now_str and h_str.strip() != "":
-                    print(f"AGENT: Skipping {emp_name} - hire date in future {h_str}")
-                    continue
+            dt_hired = safe_parse_date(data.get("dtHired"))
+            if dt_hired and dt_hired > today:
+                print(f"AGENT: Skipping {emp_name} - hire date in future {dt_hired}")
+                continue
             
-            # 3. Filter Inactive/Zero Hours
+            # 3. Filter Inactive/Empty Hours (Only if explicitly zero)
             ch = data.get("contract_hours")
             if ch is not None:
                 try:
-                    f_ch = float(ch)
-                    if f_ch <= 0:
-                        print(f"AGENT: Skipping {emp_name} - zero contract hours")
+                    if float(ch) < 0: # Negative hours? Skip. Zero might be allowed for flex workers.
                         continue
                 except:
                     pass
@@ -123,6 +140,12 @@ def get_employment(environment: str = Depends(verify_hmac)):
                 results.append(emp_obj)
             except Exception as model_err:
                 print(f"AGENT: Model Validation Error for {emp_name}: {model_err}")
+                # Try to fix minimalist data and retry once
+                if not data.get("fullName"): data["fullName"] = emp_name
+                try:
+                    results.append(Employment(**data))
+                except:
+                    pass
         
         print(f"AGENT: Final active list: {len(results)} employees for {environment}")
         return results

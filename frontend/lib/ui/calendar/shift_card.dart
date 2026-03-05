@@ -24,339 +24,153 @@ class ShiftCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final startTime = shift['start_time'];
     final endTime = shift['end_time'];
+    final bool isGrouped = shift['is_grouped'] == true;
+    final List<dynamic> subShifts = shift['sub_shifts'] ?? [shift];
     
-    // Look up activity name
-    String? activityName;
-    if (shift['activity_id'] != null) {
-      final String targetId = shift['activity_id'].toString();
-      if (activityNameMap != null) {
-         activityName = activityNameMap![targetId];
-      } else {
-         final act = activities.where((a) => a.id.toString() == targetId).firstOrNull;
-         activityName = act?.name;
-      }
-    }
-
-    final displayLabel = activityName ?? 
-        ((startTime != null && endTime != null) 
-            ? "$startTime - $endTime" 
-            : (shift['label'] ?? "Turno"));
+    // Total label for the presence
+    final presenceLabel = "$startTime - $endTime";
 
     return Draggable<Map<String, dynamic>>(
       data: shift,
       feedback: Material(
         color: Colors.transparent,
-        child: _buildCardContent(context, displayLabel, scaling: 1.1),
+        child: _buildCardContent(context, presenceLabel, subShifts, scaling: 1.1),
       ),
       childWhenDragging: Opacity(
         opacity: 0.3,
-        child: _buildCardContent(context, displayLabel),
+        child: _buildCardContent(context, presenceLabel, subShifts),
       ),
       child: InkWell(
-        onTap: () => _showShiftDetails(context, activityName),
+        onTap: () => _showShiftDetails(context, subShifts),
         borderRadius: BorderRadius.circular(8),
-        child: _buildCardContent(context, displayLabel),
+        child: _buildCardContent(context, presenceLabel, subShifts),
       ),
     );
   }
 
-  void _showShiftDetails(BuildContext context, String? activityName) {
-    final score = affinity ?? 0.0;
-    final project = shift['project'] as Map<String, dynamic>?;
-    final customer = project != null ? project['customer'] as Map<String, dynamic>? : null;
-
+  void _showShiftDetails(BuildContext context, List<dynamic> subs) {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF1E1B4B),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(24),
-          side: BorderSide(color: AppTheme.aiGlow.withOpacity(0.3)),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24), side: BorderSide(color: AppTheme.aiGlow.withOpacity(0.3))),
         title: Row(
           children: [
-            Icon(
-              shift['activity_id'] != null ? Icons.work_rounded : Icons.access_time_filled_rounded,
-              color: AppTheme.aiGlow,
-            ),
+            const Icon(Icons.calendar_month_rounded, color: AppTheme.aiGlow),
             const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                shift['activity_id'] != null ? "Dettagli Commessa" : "Dettagli Turno",
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 18),
-              ),
-            ),
+            const Text("Dettagli Giornata", style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 18)),
           ],
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (activityName != null) ...[
-              _buildDetailRow("Attività", activityName, Icons.assignment_rounded),
-              const SizedBox(height: 12),
-            ],
-            if (project != null) ...[
-              _buildDetailRow("Progetto", project['name'] ?? "N/A", Icons.folder_special_rounded),
-              const SizedBox(height: 12),
-            ],
-            if (customer != null) ...[
-              _buildDetailRow("Cliente", customer['name'] ?? "N/A", Icons.person_pin_rounded),
-              const SizedBox(height: 12),
-            ],
-            _buildDetailRow("Orario", "${shift['start_time']} - ${shift['end_time']}", Icons.schedule_rounded),
-            const SizedBox(height: 24),
-            
-            // Brain Satisfaction Bar
-            const Text(
-              "NEURAL AFFINITY",
-              style: TextStyle(color: Colors.white54, fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 1.5),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              height: 45,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(
-                color: Colors.black26,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white10),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.psychology_rounded, color: AppTheme.aiGlow, size: 20),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.start,
+        content: SizedBox(
+          width: 400,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: subs.map((s) {
+              String? actName;
+              final String? aid = s['activity_id']?.toString();
+              if (aid != null) {
+                actName = activityNameMap?[aid] ?? activities.where((a) => a.id.toString() == aid).firstOrNull?.name;
+              }
+              return Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white10)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              "${(score * 100).toInt()}% Confidence",
-                              style: TextStyle(
-                                color: score > 0.8 ? AppTheme.aiGlow : Colors.orangeAccent,
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            Text(
-                              score > 0.8 ? "OTTIMO" : "BUONO",
-                              style: TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.w900),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        LinearProgressIndicator(
-                          value: score,
-                          backgroundColor: Colors.white12,
-                          color: score > 0.8 ? AppTheme.aiGlow : Colors.orangeAccent,
-                          minHeight: 4,
-                        ),
+                        Icon(aid != null ? Icons.work_rounded : Icons.access_time_filled_rounded, color: Colors.blueAccent, size: 16),
+                        const SizedBox(width: 8),
+                        Text("${s['start_time']} - ${s['end_time']}", style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 12)),
                       ],
                     ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-            
-            // AI Reasoning Section
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: AppTheme.aiGlow.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: AppTheme.aiGlow.withOpacity(0.1)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.auto_awesome, color: AppTheme.aiGlow, size: 16),
-                      const SizedBox(width: 8),
-                      const Text(
-                        "AI REASONING (MIA)",
-                        style: TextStyle(color: AppTheme.aiGlow, fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 1),
-                      ),
-                      const Spacer(),
-                      Tooltip(
-                        message: "MIA è pre-addestrata su migliaia di turni globali. Impara orari tipici, tempi di percorrezza, e come età o distanza influenzano la stanchezza.",
-                        child: Icon(Icons.info_outline_rounded, color: AppTheme.aiGlow.withOpacity(0.5), size: 14),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    "Questo turno è stato valutato incrociando lo storico globale e parametri locali:",
-                    style: TextStyle(color: Colors.white60, fontSize: 11),
-                  ),
-                  const SizedBox(height: 8),
-                  _buildMiniTag("Prossimità alla sede", Icons.location_on_outlined),
-                  _buildMiniTag("Anzianità di servizio", Icons.history_edu_rounded),
-                  _buildMiniTag("Bilanciamento ore settimanali", Icons.balance_rounded),
-                ],
-              ),
-            ),
-          ],
+                    const SizedBox(height: 4),
+                    Text(actName ?? "Lavoro Generico (Non Collegato)", style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13)),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text("CHIUDI", style: TextStyle(color: Colors.white60, fontWeight: FontWeight.w900)),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("CHIUDI", style: TextStyle(color: Colors.white60))),
         ],
       ),
     );
   }
 
-  Widget _buildMiniTag(String text, IconData icon) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        children: [
-          Icon(icon, size: 10, color: AppTheme.aiGlow.withOpacity(0.7)),
-          const SizedBox(width: 8),
-          Text(text, style: const TextStyle(color: Colors.white38, fontSize: 10, fontWeight: FontWeight.w600)),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDetailRow(String label, String value, IconData icon) {
-    return Row(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(8)),
-          child: Icon(icon, color: Colors.blueAccent, size: 16),
-        ),
-        const SizedBox(width: 12),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label.toUpperCase(), style: const TextStyle(color: Colors.white38, fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 1)),
-            Text(value, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCardContent(BuildContext context, String text, {double scaling = 1.0}) {
+  Widget _buildCardContent(BuildContext context, String presenceLabel, List<dynamic> subs, {double scaling = 1.0}) {
     final double score = affinity ?? 0.0;
-    final bool isHighConfidence = score > 0.8;
-    final bool isLowConfidence = score < 0.5;
     
-    final Color borderColor = isHighConfidence 
-        ? AppTheme.aiGlow 
-        : (isLowConfidence ? Colors.orangeAccent : AppTheme.primary.withOpacity(0.5));
-    
-    final double borderWidth = isHighConfidence ? 1.5 : 0.8;
-
     return Container(
       width: double.infinity,
-      constraints: const BoxConstraints(minHeight: 40),
       margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       decoration: BoxDecoration(
-        color: AppTheme.primary.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: borderColor,
-          width: borderWidth,
-        ),
+        color: AppTheme.primary.withOpacity(0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: score > 0.8 ? AppTheme.aiGlow.withOpacity(0.5) : AppTheme.primary.withOpacity(0.3), width: 1),
+        boxShadow: score > 0.9 ? [BoxShadow(color: AppTheme.aiGlow.withOpacity(0.1), blurRadius: 4, spreadRadius: 1)] : null,
       ),
       child: Transform.scale(
         scale: scaling,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // Presence header
             Row(
               children: [
-                Icon(Icons.access_time_filled_rounded, size: 12, color: AppTheme.textSecondary),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    text,
-                    style: const TextStyle(
-                      color: AppTheme.textPrimary,
-                      fontSize: 11, // Increased size
-                      fontWeight: FontWeight.w800, // Thicker
-                      decoration: TextDecoration.none,
-                    ),
-                  ),
-                ),
+                const Icon(Icons.timer_outlined, size: 10, color: AppTheme.aiGlow),
+                const SizedBox(width: 4),
+                Text(presenceLabel, style: const TextStyle(color: AppTheme.textPrimary, fontSize: 10, fontWeight: FontWeight.w900, decoration: TextDecoration.none)),
               ],
             ),
-            if (historicalTime != null && historicalTime != text) ...[
-              const SizedBox(height: 2),
-              Row(
-                children: [
-                  const Icon(Icons.history, size: 10, color: Colors.amber),
-                  const SizedBox(width: 4),
-                  Text(
-                    "Prev: $historicalTime",
-                    style: TextStyle(
-                      color: Colors.amber.withOpacity(0.8),
-                      fontSize: 8,
-                      fontWeight: FontWeight.w600,
-                      decoration: TextDecoration.none,
+            const SizedBox(height: 4),
+            // Sub-Shift List (Commesse)
+            ...subs.take(2).map((s) {
+              final String? aid = s['activity_id']?.toString();
+              String name = s['activity_name']?.toString() ?? 
+                (aid != null 
+                  ? (activityNameMap?[aid] ?? activities.where((a) => a.id.toString() == aid).firstOrNull?.name ?? "Commessa")
+                  : "Generico");
+              
+              bool isGeneric = name.toLowerCase().contains("generico") || name.toLowerCase().contains("normale") || aid == null;
+              
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Row(
+                  children: [
+                    Icon(isGeneric ? Icons.circle_outlined : Icons.circle, size: 6, color: isGeneric ? Colors.white24 : Colors.blueAccent),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        name,
+                        style: TextStyle(color: isGeneric ? Colors.white38 : Colors.white.withOpacity(0.9), fontSize: 8, fontWeight: FontWeight.w500, decoration: TextDecoration.none, overflow: TextOverflow.ellipsis),
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            ],
+                  ],
+                ),
+              );
+            }),
+            if (subs.length > 2)
+              Text("+${subs.length - 2} altre", style: const TextStyle(color: Colors.white24, fontSize: 7, decoration: TextDecoration.none)),
+            
+            // AI Affinity line
             if (affinity != null) ...[
               const SizedBox(height: 4),
               Container(
-                height: 3,
+                height: 2,
                 width: double.infinity,
-                decoration: BoxDecoration(
-                  color: Colors.black12,
-                  borderRadius: BorderRadius.circular(1.5),
-                ),
+                decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(1)),
                 child: FractionallySizedBox(
                   alignment: Alignment.centerLeft,
                   widthFactor: score.clamp(0.0, 1.0),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(1.5),
-                      gradient: LinearGradient(
-                        colors: [
-                          Colors.redAccent.withOpacity(0.8),
-                          Colors.orangeAccent,
-                          AppTheme.aiGlow,
-                        ],
-                      ),
-                    ),
-                  ),
+                  child: Container(decoration: BoxDecoration(borderRadius: BorderRadius.circular(1), gradient: LinearGradient(colors: [Colors.orange, AppTheme.aiGlow]))),
                 ),
               ),
             ],
-            // NEW: Absence Risk Indicator
-            if (absenceRisk != null && absenceRisk! > 0.2) ...[
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded, size: 10, color: Colors.orange),
-                  const SizedBox(width: 4),
-                  Text(
-                    "RISK: ${(absenceRisk! * 100).toInt()}%",
-                    style: const TextStyle(
-                      color: Colors.orange,
-                      fontSize: 8,
-                      fontWeight: FontWeight.bold,
-                      decoration: TextDecoration.none,
-                    ),
-                  )
-                ],
-              )
-            ]
           ],
         ),
       ),

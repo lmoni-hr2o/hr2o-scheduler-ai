@@ -249,18 +249,17 @@ class ScheduleBloc extends Bloc<ScheduleEvent, ScheduleState> {
     emit(ScheduleLoading(message: "Caricamento dipendenti..."));
     try {
       // 0. Ensure we have employees loaded (critical!)
-      if (_currentEmployees.isEmpty) {
-        final rawEmps = await repository.getEmployment();
-        final seenNames = <String>{};
-        _currentEmployees = rawEmps.where((e) {
-          final nameKey = _normalizeName(e.fullName);
-          if (nameKey.isEmpty || seenNames.contains(nameKey)) return false;
-          seenNames.add(nameKey);
-          return true;
-        }).toList();
+      // 0. Force Refresh of employees/activities to catch dismissals or contract changes
+      final rawEmps = await repository.getEmployment();
+      final seenNames = <String>{};
+      _currentEmployees = rawEmps.where((e) {
+        final nameKey = _normalizeName(e.fullName);
+        if (nameKey.isEmpty || seenNames.contains(nameKey)) return false;
+        seenNames.add(nameKey);
+        return true;
+      }).toList();
 
-        _currentActivities = await repository.getActivities();
-      }
+      _currentActivities = await repository.getActivities();
       
       if (_currentEmployees.isEmpty) {
         emit(ScheduleError("Nessun dipendente trovato per questa azienda. Impossibile generare turni."));

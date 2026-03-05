@@ -68,6 +68,9 @@ class _CalendarGridState extends State<CalendarGrid> {
     // FIXED: Deduplicate primarily by normalized name to handle multiple sync IDs and word swaps
     final seenNames = <String>{};
     final activeEmployees = s.employees.where((e) {
+      final String nameRaw = e.fullName.toUpperCase();
+      if (nameRaw.contains("UNKNOWN") || nameRaw.isEmpty) return false;
+      
       final nameKey = _normalizeName(e.fullName);
       if (nameKey.isEmpty || seenNames.contains(nameKey)) return false;
       seenNames.add(nameKey);
@@ -391,29 +394,41 @@ class _CalendarGridState extends State<CalendarGrid> {
                             Center(
                               child: isUnavailable
                                 ? const Text("OFF", style: TextStyle(color: Colors.redAccent, fontWeight: FontWeight.w900, fontSize: 9))
-                                : (cellShifts.isEmpty 
-                                    ? const SizedBox()
-                                    : Column(
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: cellShifts.map((s) {
-                                          final hist = state.historicalSchedules.firstWhere(
-                                            (hp) => hp['employee_id'] == emp.id && hp['date'] == dateStr,
-                                            orElse: () => null
-                                          );
-                                          String? histTime;
-                                          if (hist != null) {
-                                            histTime = "${hist['tmentry']} - ${hist['tmexit']}";
-                                          }
-                                          return ShiftCard(
-                                            shift: s,
-                                            affinity: s['affinity']?.toDouble(),
-                                            absenceRisk: s['absence_risk']?.toDouble(),
-                                            historicalTime: histTime,
-                                            activities: state.activities,
-                                            activityNameMap: activityNameMap, // Pass optimized map
-                                          );
-                                        }).toList(),
-                                      )),
+                                    : Builder(builder: (ctx) {
+                                        // Grouping Logic: merge contiguous or overlapping shifts for the same person/day
+                                        final sortedForDay = List<dynamic>.from(cellShifts)
+                                          ..sort((a, b) => (a['start_time'] ?? '').toString().compareTo((b['start_time'] ?? '').toString()));
+                                        
+                                        if (sortedForDay.isEmpty) return const SizedBox.shrink();
+
+                                        // Total Range
+                                        final startTimes = sortedForDay.map((s) => (s['start_time'] ?? '23:59').toString()).toList()..sort();
+                                        final endTimes = sortedForDay.map((s) => (s['end_time'] ?? '00:00').toString()).toList()..sort();
+                                        final minStart = startTimes.first;
+                                        final maxEnd = endTimes.last;
+
+                                        // Check for historical comparison
+                                        final hist = state.historicalSchedules.firstWhere(
+                                          (hp) => (hp['employee_id'] == emp.id || _normalizeName(hp['fullName']) == _normalizeName(emp.fullName)) && hp['date'] == dateStr,
+                                          orElse: () => null
+                                        );
+                                        String? histTime;
+                                        if (hist != null) histTime = "${hist['tmentry']} - ${hist['tmexit']}";
+
+                                        return ShiftCard(
+                                          shift: {
+                                            'start_time': minStart,
+                                            'end_time': maxEnd,
+                                            'sub_shifts': sortedForDay,
+                                            'is_grouped': sortedForDay.length > 1,
+                                          },
+                                          affinity: sortedForDay.map((s) => (s['affinity'] as num? ?? 0.0).toDouble()).reduce((a, b) => a + b) / sortedForDay.length,
+                                          absenceRisk: sortedForDay.map((s) => (s['absence_risk'] as num? ?? 0.0).toDouble()).reduce((a, b) => a + b) / sortedForDay.length,
+                                          historicalTime: histTime,
+                                          activities: state.activities,
+                                          activityNameMap: activityNameMap,
+                                        );
+                                      }),
                             ),
                           ],
                         ),
