@@ -21,8 +21,10 @@ def get_companies(environment: str = Depends(verify_hmac)):
     try:
         client = get_db(namespace=environment).client
         query = client.query(kind="Company")
+        all_ents = list(query.fetch())
+        print(f"AGENT: Raw companies fetched: {len(all_ents)} for {environment}")
         results = []
-        for entity in query.fetch():
+        for entity in all_ents:
             # Show companies that either have historical data OR at least one active employee
             has_hist = entity.get("has_history") is True
             emp_count = entity.get("active_employees_count") or 0
@@ -31,6 +33,7 @@ def get_companies(environment: str = Depends(verify_hmac)):
                 data = dict(entity)
                 data["id"] = str(entity.key.id_or_name)
                 results.append(data)
+        print(f"AGENT: Final visible companies: {len(results)}")
         return results
     except Exception as e:
         print(f"ERROR fetching companies: {e}")
@@ -71,33 +74,57 @@ def get_employment(environment: str = Depends(verify_hmac)):
         results = []
         now_str = datetime.now().date().isoformat()
         
-        for entity in query.fetch():
+        entities = list(query.fetch())
+        print(f"AGENT: Raw entities fetched: {len(entities)} for namespace {environment}")
+
+        for entity in entities:
             data = dict(entity)
+            emp_name = data.get("fullName", "Unknown")
             
             # 1. Filter Dismissed
             dt_dismissed = data.get("dtDismissed")
             if dt_dismissed:
-                # If it's a date or string, compare. 
-                # Datastore usually returns strings or datetime objects.
                 d_str = dt_dismissed.isoformat() if hasattr(dt_dismissed, "isoformat") else str(dt_dismissed)
-                if d_str < now_str: 
-                    continue # Employee is gone
+                # Ensure ISO format for comparison if it's DD/MM/YYYY
+                if "/" in d_str and len(d_str) == 10:
+                    parts = d_str.split("/")
+                    d_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                
+                if d_str < now_str and d_str.strip() != "":
+                    print(f"AGENT: Skipping {emp_name} - dismissed on {d_str}")
+                    continue
             
             # 2. Filter Not Yet Hired
             dt_hired = data.get("dtHired")
             if dt_hired:
                 h_str = dt_hired.isoformat() if hasattr(dt_hired, "isoformat") else str(dt_hired)
-                if h_str > now_str:
-                    continue # Not started yet
+                if "/" in h_str and len(h_str) == 10:
+                    parts = h_str.split("/")
+                    h_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                
+                if h_str > now_str and h_str.strip() != "":
+                    print(f"AGENT: Skipping {emp_name} - hire date in future {h_str}")
+                    continue
             
-            # 3. Filter Inactive/Zero Hours (Optional but usually correct for scheduling)
-            if data.get("contract_hours") == 0:
-                continue
+            # 3. Filter Inactive/Zero Hours
+            ch = data.get("contract_hours")
+            if ch is not None:
+                try:
+                    f_ch = float(ch)
+                    if f_ch <= 0:
+                        print(f"AGENT: Skipping {emp_name} - zero contract hours")
+                        continue
+                except:
+                    pass
                 
             data["id"] = str(entity.key.id_or_name)
-            results.append(Employment(**data))
+            try:
+                emp_obj = Employment(**data)
+                results.append(emp_obj)
+            except Exception as model_err:
+                print(f"AGENT: Model Validation Error for {emp_name}: {model_err}")
         
-        print(f"AGENT: Fetched {len(results)} active employees for {environment}")
+        print(f"AGENT: Final active list: {len(results)} employees for {environment}")
         return results
     except Exception as e:
         print(f"ERROR fetching employment: {e}")
