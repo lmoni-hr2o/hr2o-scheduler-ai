@@ -16,7 +16,8 @@ class ForecastingService:
         
         self._proc = psutil.Process(os.getpid())
         self._gc = gc
-        self._mem_limit_mb = 3500 # 3.5GB Guard for a 4GB Cloud Run instance
+        # Conservative memory guard for 2Gi or 4Gi instances
+        self._mem_limit_mb = int(os.getenv("MAX_MEMORY_MB", 1800)) # Default to 1.8GB guard if 2GB instance
 
     def _log_mem(self, label):
         import sys
