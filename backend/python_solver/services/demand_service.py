@@ -54,9 +54,23 @@ class DemandService:
             i = 0
             while remaining >= 2.0:
                 block = min(target_dur, remaining)
-                curr_h = typical_start + ((i % 4) * 0.25)
+                
+                # Stagger shifts: If we need multiple blocks for the same activity on the same day,
+                # we prefer spreading them (e.g. 08-12, 12-16) instead of stacking them all at typical_start.
+                # This ensures we get both morning and afternoon coverage if demand is high.
+                curr_h = typical_start + (i * block)
+                
+                # Safety wrap: If staggering pushes us past 10PM, we reset and stack with a tiny offset 
+                # (to allow concurrent workers if staggering isn't possible anymore)
+                if curr_h > 22.0:
+                    curr_h = typical_start + ((i % 4) * 0.25)
+                
                 start_h, start_m = int(curr_h), int((curr_h - int(curr_h)) * 60)
                 end_h, end_m = int(curr_h + block), int(((curr_h + block) - int(curr_h + block)) * 60)
+                
+                # Secondary safety: if end_h > 24, cap it
+                if end_h >= 24:
+                    end_h, end_m = 23, 59
                 
                 s_time = f"{start_h:02d}:{start_m:02d}"
                 e_time = f"{end_h:02d}:{end_m:02d}"
@@ -100,11 +114,16 @@ class DemandService:
                 act_id = str(current_act.get("id")) if current_act else "generic"
                 act_name = current_act.get("name", "Lavoro Normale") if current_act else "Lavoro Normale"
                 
+                # Alternate between morning and afternoon shifts to avoid pure morning concentration
+                is_afternoon = (e_idx % 2 != 0)
+                s_time = "14:00" if is_afternoon else "08:00"
+                e_time = "20:00" if is_afternoon else "14:00"
+                
                 shifts.append({
                     "id": f"cap_{date_str}_{e_idx}",
                     "date": date_str,
-                    "start_time": "08:00",
-                    "end_time": "14:00",
+                    "start_time": s_time,
+                    "end_time": e_time,
                     "role": "WORKER",
                     "activity_id": act_id,
                     "activity_name": act_name,

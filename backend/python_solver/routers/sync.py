@@ -210,6 +210,8 @@ def full_sync(namespace: str = "OVERCLEAN", lookback_days: int = 90):
              print(f"  > Batch {i//chunk_size}: Received {len(h_data)} hour records.")
              
              for h_rec in h_data:
+                 if not h_rec or not isinstance(h_rec, dict):
+                     continue
                  eid = str(h_rec.get("idEmployment") or h_rec.get("id")) # idEmployment usually checks out
                  
                  # Calculate Weekly Hours
